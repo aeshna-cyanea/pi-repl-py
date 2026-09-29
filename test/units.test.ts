@@ -44,6 +44,7 @@ import {
 	formatResetToast,
 	type RevivableEngine,
 } from "../src/extension/session-engine.js";
+import { parseReplToggle, replArgumentCompletions, replToast, replUsageMessage, restoredTools } from "../src/extension/repl-command.js";
 import { withSkillsBlock } from "../src/extension/skill-hook.js";
 import {
 	forkParentSnapshot,
@@ -691,6 +692,45 @@ describe("per-line output cap", () => {
 		expect(a).toBe("ok");
 		expect(b.length).toBe(MAX_OUTPUT_LINE_CHARS);
 		expect(c).toBe("fine");
+	});
+});
+
+describe("/repl toggle", () => {
+	test("parses on/off, case-insensitive, whitespace-tolerant", () => {
+		expect(parseReplToggle("on")).toBe("on");
+		expect(parseReplToggle(" OFF ")).toBe("off");
+		expect(parseReplToggle("")).toBeUndefined();
+		expect(parseReplToggle("maybe")).toBeUndefined();
+		// a bare toggle is not a subcommand: the usage case
+		expect(parseReplToggle("true")).toBeUndefined();
+	});
+
+	test("completes on/off by prefix; null falls through to default completion", () => {
+		expect(replArgumentCompletions("")!.map((c) => c.value)).toEqual(["on", "off"]);
+		expect(replArgumentCompletions("o")!.map((c) => c.value)).toEqual(["on", "off"]);
+		expect(replArgumentCompletions("of")!.map((c) => c.value)).toEqual(["off"]);
+		expect(replArgumentCompletions("x")).toBeNull();
+	});
+
+	test("usage message nudges toward the subcommand that would change something", () => {
+		expect(replUsageMessage(true)).toContain("/repl off");
+		expect(replUsageMessage(true)).toContain("currently on");
+		expect(replUsageMessage(false)).toContain("/repl on");
+		expect(replUsageMessage(false)).toContain("currently off");
+	});
+
+	test("toasts announce the mode and the transition", () => {
+		expect(replToast("on")).toContain("repl on");
+		expect(replToast("on")).toContain("execute");
+		expect(replToast("off")).toContain("repl off");
+		expect(replToast("off")).toContain("stays warm");
+	});
+
+	test("restoring prefers the captured stock loadout; falls back to the built-ins", () => {
+		expect(restoredTools(["read", "bash", "my_tool"])).toEqual(["read", "bash", "my_tool"]);
+		expect(restoredTools(undefined)).toEqual(["read", "bash", "edit", "write"]);
+		// an empty capture must never restore zero tools — setActiveTools([]) bricks the session
+		expect(restoredTools([])).toEqual(["read", "bash", "edit", "write"]);
 	});
 });
 

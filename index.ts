@@ -7,6 +7,14 @@ import { Type } from "typebox";
 import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
 import { buildHelpersPromptSection } from "./src/extension/helpers.js";
 import { buildPromptGuidelines, executePromptSnippet, executeToolDescription } from "./src/extension/prompt.js";
+import {
+	type ReplToggle,
+	replArgumentCompletions,
+	replToast,
+	replUsageMessage,
+	restoredTools,
+	parseReplToggle,
+} from "./src/extension/repl-command.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
 import {
 	EngineLifecycle,
@@ -59,9 +67,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Single execute tool backed by a persistent Python evaluator; replaces the default tool surface",
 	});
 	// Flag only lands post-factory; gate per event. PI_REPL_FORCE is the dev escape.
-	const active = () => pi.getFlag("repl") === true || process.env.PI_REPL_FORCE === "1";
+	// /repl on|off flips replMode mid-session; the flag only seeds the starting mode.
+	let replMode = pi.getFlag("repl") === true || process.env.PI_REPL_FORCE === "1";
+	const active = () => replMode;
 
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
+	/** Active tools captured when /repl on takes over; /repl off puts them back. */
+	let stockTools: string[] | undefined;
 	// Pi rebuilds thrown errors as bare text; stash details to re-attach in tool_result.
 	const pendingErrorResults = new Map<string, { details: ExecuteDetails }>();
 
@@ -120,18 +132,64 @@ export default function (pi: ExtensionAPI) {
 	// --- no custom prompt: pi's default prompt stands; active tools collapse to execute, so REPL knowledge lives on the tool ---
 
 	pi.on("session_start", async (_event, ctx) => {
+		// --- both branches know the session: /repl on in a stock session needs the session file for its state dir ---
+		location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager.getSessionFile() ?? undefined };
 		if (!active()) {
-			// --- drop execute so a stock session stays stock ---
+			// --- capture the stock loadout before dropping execute: /repl off needs it, and this is
+			// the one point every stock session passes through (guarded: an empty capture must not
+			// mask the built-ins fallback) ---
+			const current = pi.getActiveTools().filter((name) => name !== "execute");
+			if (current.length > 0) stockTools = current;
 			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "execute"));
 			return;
 		}
+		// --- repl start: remember what the stock loadout was, for /repl off (guard the repeat:
+		// a loadout already collapsed to execute-only must not overwrite the capture) ---
+		const current = pi.getActiveTools().filter((name) => name !== "execute");
+		if (current.length > 0) stockTools = current;
 		pi.setActiveTools(["execute"]);
 		// --- warm the engine in the background; acquire() dedupes, so the first execute awaits this same boot ---
-		location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager.getSessionFile() ?? undefined };
 		const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
 		void lifecycle.acquire("startup", sessionKey).catch(() => {
 			// --- swallow the warm boot's rejection: boot/revive are handled on the execute path ---
 		});
+	});
+
+	// --- the mode switch: tools are transcript-owned since pi 0.86, so toggling mid-session appends a delta instead of rewriting the prompt head ---
+	pi.registerCommand("repl", {
+		description: "Toggle the persistent Python REPL: /repl on or /repl off",
+		getArgumentCompletions: replArgumentCompletions,
+		handler: async (args, ctx) => {
+			const toggle: ReplToggle | undefined = parseReplToggle(args);
+			if (!toggle) {
+				ctx.ui.notify(replUsageMessage(replMode), "warning");
+				return;
+			}
+			const on = toggle === "on";
+			if (on === replMode) {
+				// --- idempotent: a repeat /repl on must not overwrite the captured stock loadout with execute-only ---
+				ctx.ui.notify(replToast(toggle), "info");
+				return;
+			}
+			replMode = on;
+			if (toggle === "on") {
+				// --- remember the stock loadout before it collapses to execute-only (same guard as
+				// session_start: an execute-only loadout must not capture as []) ---
+				const current = pi.getActiveTools().filter((name) => name !== "execute");
+				if (current.length > 0) stockTools = current;
+				pi.setActiveTools(["execute"]);
+				// warm the engine now so the first cell doesn't pay the boot; acquire() dedupes
+				const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
+				// --- swallow the warm boot's rejection: boot/revive are handled on the execute path ---
+				void lifecycle.acquire("startup", sessionKey).catch(() => {});
+			} else {
+				// restore what was active before repl took over (captured at /repl on), so other
+				// extensions' active tools come back too; fall back to the built-ins
+				pi.setActiveTools(restoredTools(stockTools));
+				// keep the engine alive: switching back is instant and the namespace is intact
+			}
+			ctx.ui.notify(replToast(toggle), "info");
+		},
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -188,7 +246,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (!active()) {
 				throw new Error(
-					"pi-repl is dormant in this session. Start pi with --repl (or PI_REPL_FORCE=1) to use execute.",
+					"pi-repl is dormant in this session. Start pi with --repl, or run /repl on, to use execute.",
 				);
 			}
 			if (ctx?.cwd) location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager?.getSessionFile?.() ?? undefined };

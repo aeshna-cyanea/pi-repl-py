@@ -30,6 +30,10 @@ pi --repl
 A plain `pi` session is untouched; the extension is dormant until `--repl` is passed (or
 `PI_REPL_FORCE=1`).
 
+You can also switch mid-session. `/repl on` activates the REPL; `/repl off` puts your normal
+tools back (the kernel keeps running, so your Python namespace is still there when you
+switch back). The flag only decides where a session starts; the command handles the rest.
+
 ## Installing as a pi package
 
 Install the package from npm or directly from GitHub:

@@ -33,6 +33,28 @@ function engine(opts: Record<string, unknown>) {
 	return m;
 }
 
+/**
+ * Scale a deadline to this machine's measured kernel cold-boot cost. The timing-sensitive
+ * tests (reaper, silence watchdog) assume a warm x86 laptop; on a slow interpreter host
+ * (Termux/Android, loaded CI) the same absolute deadlines flake. The cost that matters is
+ * `import ipykernel`, not process spawn; one measurement, cached.
+ */
+let bootFactorCache: number | undefined;
+function slowFactor(baseMs: number): number {
+	if (bootFactorCache === undefined) {
+		const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
+		const py = process.env.PYTHON ?? `${process.env.HOME}/.pi/agent/pi-repl/venv/bin/python3`;
+		const t0 = Date.now();
+		const r = spawnSync(py, ["-c", "import ipykernel"], { timeout: 30_000 });
+		const cold = Date.now() - t0;
+		if (r.status !== 0) return baseMs; // measurement failed: keep the base deadline
+		// a healthy laptop imports ipykernel in <1s; Termux takes ~2s. Scale linearly against
+		// the 1s baseline, clamped to [1x, 8x] so neither extreme runs away.
+		bootFactorCache = Math.min(8, Math.max(1, cold / 1000));
+	}
+	return Math.round(baseMs * bootFactorCache);
+}
+
 // --- kernels must not outlive their test: the watchdog assertions are timing-sensitive,
 // --- and a pile of idle ipykernel processes from earlier tests starves the CPU enough to
 // --- push inter-beat gaps past the silence window, flaking "output keeps the watchdog fed"
@@ -208,7 +230,10 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 			const scraper = report!.find((h) => h.name === "scraper");
 			expect(double?.ok).toBe(true);
 			expect(scraper?.ok).toBe(false);
-			expect(scraper?.error).toContain("SyntaxError");
+			// CPython 3.13 raises _IncompleteInputError (a SyntaxError subclass, so the ename no
+			// longer contains "SyntaxError") for unclosed brackets; older interpreters raise plain
+			// SyntaxError. The point is the helper failed to parse and the failure is named.
+			expect(scraper?.error).toMatch(/(_IncompleteInputError|^SyntaxError|incomplete input)/);
 
 			// the report is handed out exactly once per boot
 			expect(m.takeHelperReport()).toBeNull();
@@ -483,7 +508,7 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 	test(
 		"a snapshot whose revive wedges is skipped in the background and the session still starts",
-		{ timeout: 90_000 },
+		{ timeout: 240_000 },
 		async () => {
 			const d = tempDir();
 			const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
@@ -498,27 +523,35 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 			// the boot deadline bounds kernel start + helpers preload; the restore cell has its own
 			// engine-level watchdog (same env var), and the lifecycle skips reviving after the boot
-			// deadline trips. Both get a short deadline so the wedge is detected fast.
+			// deadline trips. Both get a short deadline so the wedge is detected fast. On a slow
+			// machine (Termux) even kernel START can outlive the default deadline, so the deadline
+			// scales with the interpreter's measured cold-boot cost.
+			const bootDeadline = slowFactor(8_000);
 			const lc = new EngineLifecycle<EngineManager>({
 				create: (skip) =>
-					engine({ cwd: d, snapshot: snap, skipRestore: skip, env: { PI_REPL_BOOT_TIMEOUT_MS: "3000" } }),
+					engine({
+						cwd: d,
+						snapshot: snap,
+						skipRestore: skip,
+						env: { PI_REPL_BOOT_TIMEOUT_MS: String(Math.round(bootDeadline * 0.375)) },
+					}),
 				async dispose(m) {
 					await m.dispose();
 				},
 				async discard(m) {
 					await m.kill();
 				},
-				bootTimeoutMs: 8_000,
+				bootTimeoutMs: bootDeadline,
 			});
 			const started = Date.now();
 			const { engine: m2, restore } = await lc.acquire("cell");
 			// recovery is async: acquire returns after BOOT, not after the wedged restore settles
-			expect(Date.now() - started).toBeLessThan(15_000);
+			expect(Date.now() - started).toBeLessThan(bootDeadline + 7_000);
 			expect(restore).toBe(null);
 
 			// the poisoned revive is detected in the background: the reaper kills the wedged kernel
 			// and the engine marks the restore skipped; the announcement follows once that settles
-			const noticeDeadline = Date.now() + 30_000;
+			const noticeDeadline = Date.now() + slowFactor(30_000);
 			let notice: ReturnType<typeof lc.takeResetNotice> | undefined;
 			while (Date.now() < noticeDeadline && !notice) {
 				notice = lc.takeResetNotice();

@@ -8,7 +8,7 @@ the kernel without taking pi down; the host stays answerable.
 
 ```
 pi
- └─ extension (index.ts)              registers `execute`; dormant until --repl
+ └─ extension (index.ts)              registers `execute`; dormant until --repl or /repl on
      └─ EngineManager (src/engine/index.ts)   venv resolution, lazy spawn,
          │                                   the call queue, output caps,
          │                                   abort grace, teardown
@@ -19,6 +19,31 @@ pi
                                  │          restore, interrupts
                                  └─ ipykernel   the evaluator
 ```
+
+## Activation: the flag and the /repl command
+
+The `--repl` flag (or `PI_REPL_FORCE=1`) seeds the starting mode at `session_start`: active
+tools collapse to `execute`, the engine warms in the background, and the helpers block joins
+the prompt. Without the flag the extension stays dormant.
+
+`/repl on` and `/repl off` flip the mode mid-session. That used to be a non-starter: the
+prompt and the tool list were rebuilt per request, so a switch rewrote the message head and
+took the cached prefix down with it. Since pi 0.86 both live in the transcript instead. A
+system message carries the initial sections and tool declarations; a later change appends a
+delta (`toolsAdded`/`toolsRemoved`, section patches) rather than touching the head.
+Providers that can express the transition (the newest Anthropic models) keep their cached
+prefix across the switch. The rest take a one-time miss, the same cost the flag-only design
+paid to avoid switching at all.
+
+`/repl on` captures the stock tool loadout so `/repl off` can put it back. All three capture
+points guard the same way (dormant `session_start`, repl `session_start`, the command): a
+loadout that is already execute-only must not capture as an empty list, because restoring
+`[]` would hand the model no tools at all. `restoredTools` falls back to the built-ins when
+nothing was captured or the capture is empty. The engine stays alive across the switch, so
+returning to repl is instant and the namespace is intact. Two accepted v1 limits: a cell
+still running when `/repl off` lands completes normally (the kernel is warm; only the tool
+delta changes), and loadout changes made by other extensions while repl is on are not
+tracked, so `/repl off` restores what was captured at `/repl on`.
 
 ## Why the boundary is one pipe
 

@@ -1,3 +1,14 @@
+## [0.9.0]
+
+### Added
+
+- `/repl on` and `/repl off`: switch the persistent Python REPL on and off mid-session. The
+  `--repl` flag now only sets the starting mode. `/repl off` restores the tools that were
+  active before repl took over (the built-ins if nothing was captured); the kernel is left
+  running, so the namespace survives the round trip. Switching appends a tool delta to the
+  transcript instead of rewriting the prompt, which on the newest Anthropic models keeps the
+  cached prefix intact across the switch; other providers re-read the prefix once.
+
 ## [0.8.0] - 2026-09-04
 
 ### Changed
