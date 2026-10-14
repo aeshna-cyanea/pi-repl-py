@@ -9,12 +9,15 @@ import { buildHelpersPromptSection } from "./src/extension/helpers.js";
 import { buildPromptGuidelines, executePromptSnippet, executeToolDescription } from "./src/extension/prompt.js";
 import {
 	type ReplToggle,
+	droppedToolNames,
+	prunedLoadout,
 	replArgumentCompletions,
 	replToast,
 	replUsageMessage,
 	restoredTools,
 	parseReplToggle,
 } from "./src/extension/repl-command.js";
+import { loadReplConfig, startEngaged } from "./src/extension/repl-config.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
 import {
 	EngineLifecycle,
@@ -66,10 +69,16 @@ export default function (pi: ExtensionAPI) {
 		type: "boolean",
 		description: "Single execute tool backed by a persistent Python evaluator; replaces the default tool surface",
 	});
-	// Flag only lands post-factory; gate per event. PI_REPL_FORCE is the dev escape.
-	// /repl on|off flips replMode mid-session; the flag only seeds the starting mode.
-	let replMode = pi.getFlag("repl") === true || process.env.PI_REPL_FORCE === "1";
-	const active = () => replMode;
+	// --- the flag lands post-factory, so it is read per event instead of cached here. Caching it at
+	// factory time made `pi --repl` a no-op: measured 2026-10-14, with --repl the active set stayed
+	// the stock loadout and execute was never even activated, so only `/repl on` mid-session worked.
+	// PI_REPL_FORCE=1/0 is the operator escape in both directions; pi-repl.json's defaultOn starts
+	// every session engaged; /repl on|off is the per-session override and beats all three. ---
+	const config = loadReplConfig(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
+	let replOverride: boolean | undefined;
+	const active = () =>
+		replOverride ??
+		startEngaged({ flagOn: pi.getFlag("repl") === true, force: process.env.PI_REPL_FORCE, defaultOn: config.defaultOn });
 
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
 	/** Active tools captured when /repl on takes over; /repl off puts them back. */
@@ -145,9 +154,14 @@ export default function (pi: ExtensionAPI) {
 		}
 		// --- repl start: remember what the stock loadout was, for /repl off (guard the repeat:
 		// a loadout already collapsed to execute-only must not overwrite the capture) ---
-		const current = pi.getActiveTools().filter((name) => name !== "execute");
+		const before = pi.getActiveTools();
+		const current = before.filter((name) => name !== "execute");
 		if (current.length > 0) stockTools = current;
-		pi.setActiveTools(["execute"]);
+		// --- collapse Pi's built-ins only; another extension's tool survives unless the operator
+		// drops it on purpose, and whatever did go is named out loud rather than left to inference ---
+		const next = prunedLoadout(before, config.drop);
+		pi.setActiveTools(next);
+		ctx.ui.notify(replToast("on", droppedToolNames(before, next), next), "info");
 		// --- warm the engine in the background; acquire() dedupes, so the first execute awaits this same boot ---
 		const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
 		void lifecycle.acquire("startup", sessionKey).catch(() => {
@@ -162,22 +176,26 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const toggle: ReplToggle | undefined = parseReplToggle(args);
 			if (!toggle) {
-				ctx.ui.notify(replUsageMessage(replMode), "warning");
+				ctx.ui.notify(replUsageMessage(active()), "warning");
 				return;
 			}
 			const on = toggle === "on";
-			if (on === replMode) {
+			if (on === active()) {
 				// --- idempotent: a repeat /repl on must not overwrite the captured stock loadout with execute-only ---
-				ctx.ui.notify(replToast(toggle), "info");
+				ctx.ui.notify(replToast(toggle, [], pi.getActiveTools()), "info");
 				return;
 			}
-			replMode = on;
+			replOverride = on;
+			const before = pi.getActiveTools();
+			let toast: string;
 			if (toggle === "on") {
-				// --- remember the stock loadout before it collapses to execute-only (same guard as
+				// --- remember the stock loadout before the built-ins collapse (same guard as
 				// session_start: an execute-only loadout must not capture as []) ---
-				const current = pi.getActiveTools().filter((name) => name !== "execute");
+				const current = before.filter((name) => name !== "execute");
 				if (current.length > 0) stockTools = current;
-				pi.setActiveTools(["execute"]);
+				const next = prunedLoadout(before, config.drop);
+				pi.setActiveTools(next);
+				toast = replToast("on", droppedToolNames(before, next), next);
 				// warm the engine now so the first cell doesn't pay the boot; acquire() dedupes
 				const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
 				// --- swallow the warm boot's rejection: boot/revive are handled on the execute path ---
@@ -185,10 +203,12 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				// restore what was active before repl took over (captured at /repl on), so other
 				// extensions' active tools come back too; fall back to the built-ins
-				pi.setActiveTools(restoredTools(stockTools));
+				const restored = restoredTools(stockTools);
+				pi.setActiveTools(restored);
+				toast = replToast("off", restored.filter((name) => !before.includes(name)));
 				// keep the engine alive: switching back is instant and the namespace is intact
 			}
-			ctx.ui.notify(replToast(toggle), "info");
+			ctx.ui.notify(toast, "info");
 		},
 	});
 

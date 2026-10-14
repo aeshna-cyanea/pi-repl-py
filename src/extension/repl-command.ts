@@ -20,10 +20,55 @@ export function replUsageMessage(replMode: boolean): string {
 	return `Usage: /repl ${replMode ? "off" : "on"} — repl is currently ${replMode ? "on" : "off"}`;
 }
 
-export function replToast(toggle: ReplToggle): string {
-	return toggle === "on"
-		? "repl on — execute is now the active tool; the default tools are inactive until /repl off"
-		: "repl off — default tools restored; the kernel stays warm with its namespace";
+/**
+ * Pi's own built-in tool names: the surface a Python kernel genuinely replaces (argv lists and
+ * open()/str.replace() beat a quoting layer and a no-op-on-a-typo anchor). Everything else an
+ * extension registers stays active in repl mode, because repl mode has no opinion about it.
+ *
+ * Deliberately NOT in this list: `codemode` and `tool_search` (built-in *extensions*, not built-in
+ * tools — codemode is a composition surface, not a file/shell tool), and `execute` itself.
+ *
+ * The axis is NAMES, not provenance: pi-ssh-remote wraps read/bash/edit/write, so those four carry
+ * sourceInfo "npm:pi-ssh-remote" on a box that has it installed, and pruning by source would keep
+ * the wrapped (and more expensive) copies. Pi exports no constant for this set to extensions —
+ * DEFAULT_TOOL_NAMES (dist/core/settings-manager.js) is only the four defaults, while grep/find/ls/
+ * powershell live in allToolNames — so this list is ours to keep in step, and the test pins the four
+ * names the kernel actually replaces so a Pi rename cannot silently stop the prune.
+ */
+export const BUILTIN_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"];
+
+export const EXECUTE_TOOL = "execute";
+
+/**
+ * The loadout /repl on should install: execute, plus every active tool that is neither one of Pi's
+ * built-ins nor named in the operator's extra drop list. `drop` can never remove execute — the
+ * kernel is the point of the mode.
+ */
+export function prunedLoadout(active: readonly string[], drop: readonly string[] = []): string[] {
+	const skip = new Set<string>([...BUILTIN_TOOL_NAMES, ...drop]);
+	return [EXECUTE_TOOL, ...active.filter((name) => name !== EXECUTE_TOOL && !skip.has(name))];
+}
+
+/** The names the prune took away, in the order they were active. The toast is built from this, so a
+ *  tool another extension lost is named out loud instead of vanishing from the prompt. */
+export function droppedToolNames(active: readonly string[], next: readonly string[]): string[] {
+	const kept = new Set(next);
+	return active.filter((name) => !kept.has(name));
+}
+
+/**
+ * Announce the transition *with what it changed*. `changed` is what was dropped (on) or restored
+ * (off); `kept` is what survived the prune. A silent collapse is how another extension's tool goes
+ * missing for a whole session without anyone being able to say which one.
+ */
+export function replToast(toggle: ReplToggle, changed: readonly string[] = [], kept: readonly string[] = []): string {
+	if (toggle === "on") {
+		const head = "repl on — execute is the active tool; Pi's built-in tools are inactive until /repl off";
+		if (changed.length === 0) return `${head}; nothing else was dropped`;
+		return `${head}\n  dropped: ${changed.join(" ")}\n  kept:    ${kept.join(" ")}`;
+	}
+	const head = "repl off — default tools restored; the kernel stays warm with its namespace";
+	return changed.length > 0 ? `${head}\n  restored: ${changed.join(" ")}` : head;
 }
 
 /**

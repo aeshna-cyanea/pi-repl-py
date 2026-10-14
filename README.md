@@ -27,12 +27,50 @@ just setup            # npm install + a project-local .venv with ipykernel
 pi --repl
 ```
 
-A plain `pi` session is untouched; the extension is dormant until `--repl` is passed (or
-`PI_REPL_FORCE=1`).
+A plain `pi` session is untouched unless you ask for it: `--repl`, `PI_REPL_FORCE=1`, or
+`"defaultOn": true` in `pi-repl.json` (below) starts every session in the REPL.
 
 You can also switch mid-session. `/repl on` activates the REPL; `/repl off` puts your normal
 tools back (the kernel keeps running, so your Python namespace is still there when you
 switch back). The flag only decides where a session starts; the command handles the rest.
+
+## What repl mode does to the tool surface
+
+`/repl on` collapses **Pi's own built-in tools** — `read`, `bash`, `edit`, `write`, `grep`, `find`,
+`ls`, `powershell` — because a Python kernel genuinely replaces them (argv lists beat a quoting
+layer; `open()` plus a checked anchor beats a silent no-op). Everything **another extension**
+registers stays active: context tools, question tools, live-status tools. Repl mode has no opinion
+about tools it did not replace, so nothing an extension relies on vanishes silently.
+
+Two consequences worth knowing:
+
+- The axis is **names, not provenance**. If another extension wraps `read`/`bash`/`edit`/`write`
+  (pi-ssh-remote does), those wrapped copies are pruned too — the kernel replaces the job, not the
+  author.
+- The `/repl on` toast **names what it dropped and what it kept**, so a tool that is missing later
+  is a name you already saw rather than a mystery.
+
+To drop more than the built-ins, name the tools in `pi-repl.json` — only where the kernel has a
+genuinely better route to the same job.
+
+## Settings: `<agent dir>/pi-repl.json`
+
+```json
+{
+  "defaultOn": true,
+  "drop": ["sessions", "remote"]
+}
+```
+
+| key | meaning |
+|---|---|
+| `defaultOn` | start every session in the REPL. `--repl` and `/repl on` still work; `PI_REPL_FORCE=0` starts a stock session without editing files |
+| `drop` | extension tools the REPL should also collapse. A name that is not registered is a no-op; `execute` can never be dropped |
+
+Precedence at startup: `PI_REPL_FORCE=1` on, `PI_REPL_FORCE=0` off, then `--repl`, then
+`defaultOn`. `/repl on` / `/repl off` overrides everything for the rest of the session. A file that
+exists but cannot be parsed is reported on stderr and the defaults apply — a silently ignored config
+is a knob that stops working without saying so.
 
 ## Installing as a pi package
 

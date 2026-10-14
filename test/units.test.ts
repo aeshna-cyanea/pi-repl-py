@@ -44,7 +44,8 @@ import {
 	formatResetToast,
 	type RevivableEngine,
 } from "../src/extension/session-engine.js";
-import { parseReplToggle, replArgumentCompletions, replToast, replUsageMessage, restoredTools } from "../src/extension/repl-command.js";
+import { BUILTIN_TOOL_NAMES, droppedToolNames, parseReplToggle, prunedLoadout, replArgumentCompletions, replToast, replUsageMessage, restoredTools } from "../src/extension/repl-command.js";
+import { DEFAULT_REPL_CONFIG, loadReplConfig, parseReplConfig, startEngaged } from "../src/extension/repl-config.js";
 import { withSkillsBlock } from "../src/extension/skill-hook.js";
 import {
 	forkParentSnapshot,
@@ -204,8 +205,16 @@ describe("helper boot announcements", () => {
 			expect(block).toContain("Preloaded helpers");
 			expect(block).toContain("web(q) the PROJECT version.");
 		});
+		// "absent" needs *no* helpers anywhere. The global tier falls back to this machine's real
+		// ~/.pi/agent/pi-repl/helpers, so an unisolated call advertises whoever's helpers happen to be
+		// installed — on bagheera that is cap/show, grist, sessions, patch/peek and trimwatch, and the
+		// assertion has been red there ever since the global tier grew a default. The claim under test
+		// is "an empty corpus advertises nothing", not "this machine has no helpers".
 		const empty = mkdtempSync(join(tmpdir(), "pi-repl-sec-empty-"));
-		expect(buildHelpersPromptSection(empty)).toBeUndefined();
+		const emptyGlobal = mkdtempSync(join(tmpdir(), "pi-repl-sec-empty-global-"));
+		withEnv("PI_HELPERS_GLOBAL_DIR", emptyGlobal, () => {
+			expect(buildHelpersPromptSection(empty)).toBeUndefined();
+		});
 	});
 
 	test("PI_HELPERS_DIR replaces the whole tier list in the prompt section, like the kernel", () => {
@@ -731,6 +740,96 @@ describe("/repl toggle", () => {
 		expect(restoredTools(undefined)).toEqual(["read", "bash", "edit", "write"]);
 		// an empty capture must never restore zero tools — setActiveTools([]) bricks the session
 		expect(restoredTools([])).toEqual(["read", "bash", "edit", "write"]);
+	});
+});
+
+describe("repl tool surface: prune Pi's built-ins, never another extension's tools", () => {
+	// The loadout bagheera actually runs, measured at before_provider_request on 2026-10-14.
+	const STOCK = ["read", "bash", "edit", "write", "codemode", "llama_slots", "sessions", "ask_user_question", "remote", "context_checkpoint", "context_timeline", "context_compact"];
+
+	test("the prune drops Pi's built-ins and leaves every extension tool active", () => {
+		expect(prunedLoadout(STOCK)).toEqual(["execute", "codemode", "llama_slots", "sessions", "ask_user_question", "remote", "context_checkpoint", "context_timeline", "context_compact"]);
+	});
+
+	test("the four built-ins are pruned by NAME, not by provenance", () => {
+		// pi-ssh-remote wraps read/bash/edit/write, so on a box that installs it those four carry
+		// sourceInfo "npm:pi-ssh-remote". Pruning by source would keep the wrapped copies — edit
+		// alone costs 1,180 B of schema+description — and would drop nothing the kernel replaces.
+		expect(prunedLoadout(["read", "bash", "edit", "write"])).toEqual(["execute"]);
+	});
+
+	test("the operator drop list removes named extension tools, and can never remove execute", () => {
+		expect(prunedLoadout(["execute", "sessions", "remote", "context_compact"], ["sessions", "remote"])).toEqual(["execute", "context_compact"]);
+		// a drop list that names execute still leaves the kernel: the mode is the point
+		expect(prunedLoadout(["sessions"], ["execute", "sessions"])).toEqual(["execute"]);
+		// a name that is not registered is a no-op, not an error
+		expect(prunedLoadout(["codemode"], ["no_such_tool"])).toEqual(["execute", "codemode"]);
+	});
+
+	test("the toast names what the prune took, so a lost tool is visible instead of inferred", () => {
+		const next = prunedLoadout(STOCK, ["sessions", "remote"]);
+		const dropped = droppedToolNames(STOCK, next);
+		expect(dropped).toEqual(["read", "bash", "edit", "write", "sessions", "remote"]);
+		const toast = replToast("on", dropped, next);
+		expect(toast).toContain("dropped: read bash edit write sessions remote");
+		expect(toast).toContain("kept:");
+		expect(toast).toContain("context_timeline");
+		// the point of the rule, said out loud: it is Pi's built-ins that go inactive
+		expect(toast).toContain("Pi's built-in tools");
+	});
+
+	test("BUILTIN_TOOL_NAMES covers the names the kernel replaces, and not the ones it does not", () => {
+		for (const name of ["read", "bash", "edit", "write"]) expect(BUILTIN_TOOL_NAMES).toContain(name);
+		// codemode is a composition surface (and today the only programmatic route to extension tools
+		// from a cell), so repl mode must not prune it
+		expect(BUILTIN_TOOL_NAMES).not.toContain("codemode");
+		expect(BUILTIN_TOOL_NAMES).not.toContain("execute");
+	});
+
+	test("/repl off names what came back", () => {
+		expect(replToast("off", ["sessions", "remote"])).toContain("restored: sessions remote");
+		expect(replToast("off")).toContain("stays warm");
+	});
+});
+
+describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
+	test("a box with no config file gets the defaults", () => {
+		const missing = mkdtempSync(join(tmpdir(), "pi-repl-nocfg-"));
+		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [] });
+	});
+
+	test("defaultOn and the drop list are read", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-cfg-"));
+		writeFileSync(join(dir, "pi-repl.json"), JSON.stringify({ defaultOn: true, drop: ["sessions", "remote"] }));
+		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"] });
+	});
+
+	test("a config file that exists but cannot be parsed is loud, and defaults apply", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-cfg-bad-"));
+		writeFileSync(join(dir, "pi-repl.json"), "{ defaultOn: true,,");
+		const warns: string[] = [];
+		expect(loadReplConfig(dir, (m) => warns.push(m))).toEqual(DEFAULT_REPL_CONFIG);
+		expect(warns.length).toBe(1);
+		expect(warns[0]).toContain("pi-repl.json");
+	});
+
+	test("junk entries are ignored with a count, never silently", () => {
+		const warns: string[] = [];
+		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"] });
+		expect(warns.join(" ")).toContain("ignored 2");
+		const warns2: string[] = [];
+		expect(parseReplConfig({ defaultOn: "yes", drop: "sessions" }, (m) => warns2.push(m))).toEqual(DEFAULT_REPL_CONFIG);
+		expect(warns2.length).toBe(2);
+	});
+
+	test("precedence: the escape hatch wins both ways, then the flag, then the configured default", () => {
+		expect(startEngaged({ flagOn: false, force: "1", defaultOn: false })).toBe(true);
+		expect(startEngaged({ flagOn: true, force: "0", defaultOn: true })).toBe(false);
+		expect(startEngaged({ flagOn: true, defaultOn: false })).toBe(true);
+		expect(startEngaged({ flagOn: false, defaultOn: true })).toBe(true);
+		expect(startEngaged({ flagOn: false, defaultOn: false })).toBe(false);
+		// any other value of the escape hatch is not a force
+		expect(startEngaged({ flagOn: false, force: "yes", defaultOn: true })).toBe(true);
 	});
 });
 
