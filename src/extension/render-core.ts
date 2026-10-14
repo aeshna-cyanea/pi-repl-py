@@ -16,6 +16,12 @@ export interface DiffCardItem {
 export interface DiffCard {
 	kind: "diffs";
 	items: DiffCardItem[];
+	/**
+	 * How many items the writer's own bound (`CARD_MAX_ITEMS`) hid from the card. Carried because a
+	 * bound that hides silently reads as a complete card — the exact bug the writer had first, where
+	 * fifteen patches reported "1" dropped when three were. Rendering it is the other half of that fix.
+	 */
+	droppedItems?: number;
 }
 
 /**
@@ -26,7 +32,7 @@ export interface DiffCard {
  */
 export function readDiffCard(value: unknown): DiffCard | undefined {
 	if (!value || typeof value !== "object") return undefined;
-	const card = value as { kind?: unknown; items?: unknown };
+	const card = value as { kind?: unknown; items?: unknown; droppedItems?: unknown };
 	if (card.kind !== "diffs" || !Array.isArray(card.items)) return undefined;
 	const items = card.items.flatMap((item): DiffCardItem[] => {
 		if (!item || typeof item !== "object") return [];
@@ -40,7 +46,9 @@ export function readDiffCard(value: unknown): DiffCard | undefined {
 			diff: it.diff,
 		}];
 	});
-	return items.length > 0 ? { kind: "diffs", items } : undefined;
+	if (items.length === 0) return undefined;
+	const dropped = Number.isFinite(card.droppedItems) ? Number(card.droppedItems) : 0;
+	return dropped > 0 ? { kind: "diffs", items, droppedItems: dropped } : { kind: "diffs", items };
 }
 
 export interface ExecuteDetails {
@@ -241,6 +249,20 @@ function topLine(state: ExecuteRenderState, width: number, deps: RenderDeps): st
 
 	const duration = formatDuration(state.details?.durationMs);
 	if (duration) suffixParts.push(deps.fg("muted", duration));
+
+	// --- a collapsed cell shows the change without expanding it. Counts come from the writer, so they
+	// stay exact even when the diff text itself was bounded; the path stays in the expanded card because
+	// a suffix that grows eats the code preview, and the preview is what identifies the cell. ---
+	if (!state.isPartial && statusKind(state) !== "running") {
+		const card = readDiffCard(state.details?.card);
+		if (card) {
+			const added = card.items.reduce((sum, item) => sum + item.added, 0);
+			const removed = card.items.reduce((sum, item) => sum + item.removed, 0);
+			suffixParts.push(
+				`${deps.fg("dim", "diff")} ${deps.fg("success", `+${added}`)} ${deps.fg("error", `−${removed}`)}`,
+			);
+		}
+	}
 
 	// --- counts settle-only: live-updating them mid-stream jitters the header ---
 	if (!state.isPartial && statusKind(state) !== "running") {
@@ -509,6 +531,59 @@ function wrapBlob(state: ExecuteRenderState, width: number, text: string, color:
 	return fresh().lines;
 }
 
+/**
+ * Per-line colour for one line of a unified diff. Checked in diff order, not character order: the file
+ * headers (`---`/`+++`) have to be tested before the single-char `+`/`-` they would otherwise fall into.
+ * A removed line whose own text starts with `--` is indistinguishable from a file header at this layer —
+ * the writer sends plain text, not line kinds — so it gets the dim colour. Cosmetic, and cheaper than
+ * widening the card protocol to carry a flag nobody needs yet.
+ */
+function diffColorFor(line: string): string {
+	if (line.startsWith("@@")) return "accent";
+	if (line.startsWith("---") || line.startsWith("+++")) return "dim";
+	if (line.startsWith("+")) return "success";
+	if (line.startsWith("-")) return "error";
+	return "toolOutput";
+}
+
+/**
+ * One header per file, then its diff with per-line colour. Deliberately NOT routed through `wrapBlob`:
+ * that cache assumes an append-only blob and re-wraps only the growing tail, while a card is replaced
+ * whole every cell. Reusing it would be a cache that answers a question nobody asked.
+ */
+function renderDiffCard(output: string[], card: DiffCard, width: number, deps: RenderDeps): void {
+	for (const item of card.items) {
+		const label = deps.fg("dim", "diff:");
+		const counts = `${deps.fg("success", `+${item.added}`)} ${deps.fg("error", `−${item.removed}`)}`;
+		const dry = item.dryRun ? ` ${deps.fg("warning", "(dry run)")}` : "";
+		// --- the path is the part that can be arbitrarily long, so the path is what gets shortened:
+		// a header that truncates from the end loses the counts, and the counts are the whole point of
+		// showing the line at all. Trailing "" ellipsis like every other row, so a clipped row still
+		// respects the width the caller asked for. ---
+		const fixed = 1 + OUTPUT_INDENT.length + deps.visibleWidth(label) + deps.visibleWidth(counts) + deps.visibleWidth(dry) + 3;
+		const path = deps.truncateToWidth(deps.fg("accent", item.path), Math.max(4, width - fixed), "…");
+		output.push(deps.truncateToWidth(` ${OUTPUT_INDENT}${label} ${path} ${counts}${dry}`, width, ""));
+		const body = item.diff.replace(/\n+$/, "");
+		if (!body) {
+			output.push(` ${OUTPUT_INDENT}${deps.fg("muted", "(no diff text)")}`);
+			continue;
+		}
+		for (const line of body.split("\n")) {
+			wrapRawOutputLine(output, line === "" ? " " : line, diffColorFor(line), width, deps);
+		}
+	}
+	// --- the writer bounded the card; say so, or a partial card reads as the whole change ---
+	if (card.droppedItems) {
+		output.push(
+			deps.truncateToWidth(
+				` ${OUTPUT_INDENT}${deps.fg("warning", `… ${card.droppedItems} more change(s) not shown`)}`,
+				width,
+				"",
+			),
+		);
+	}
+}
+
 function renderOutput(
 	state: ExecuteRenderState,
 	lines: string[],
@@ -519,13 +594,18 @@ function renderOutput(
 	const details = state.details;
 	const output: string[] = [];
 
+	// --- the card goes first: it is what the cell *did*, and the only rendering with per-line colour.
+	// A card that fails validation renders as if it had never existed, which is the pre-card cell. ---
+	const card = readDiffCard(details?.card);
+	let renderedText = card !== undefined;
+	if (card) renderDiffCard(output, card, width, deps);
+
 	// --- stdout/stderr/result are color-coded; sanitize before section color so our ANSI isn't escaped ---
 	const sections: Array<{ text: string | undefined; color: string; label: string }> = [
 		{ text: details?.stdout, color: "toolOutput", label: "stdout" },
 		{ text: details?.stderr, color: "warning", label: "stderr" },
 		{ text: details?.result, color: "accent", label: "result" },
 	];
-	let renderedText = false;
 	for (const { text, color, label } of sections) {
 		if (!text?.trim()) continue;
 		renderedText = true;

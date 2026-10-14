@@ -30,6 +30,7 @@ import {
 	formatDuration,
 	paintBackground,
 	type RenderDeps,
+	readDiffCard,
 	renderExecuteBody,
 	renderExecuteCell,
 	renderExecuteHeader,
@@ -1576,5 +1577,147 @@ describe("bridge pipe routing", () => {
 		feed(`{"type":"reply","id":"${req.id}","error":"snapshot unreadable"}`);
 		await expect(rest).rejects.toThrow("snapshot unreadable");
 		expect(() => feed("this is not json")).not.toThrow();
+	});
+});
+
+// --- Key 138 half 2: the diff card.
+// testDeps' `fg` throws the colour name away, which is right for layout tests and useless for a diff,
+// where the colour IS the information. These give `fg` a real palette so the assertion reads it back off
+// the raw row, while stripAnsi still measures width correctly.
+const PALETTE: Record<string, string> = {
+	success: "32",
+	error: "31",
+	accent: "36",
+	dim: "2",
+	toolOutput: "37",
+	warning: "33",
+	muted: "90",
+};
+const colorDeps = (): RenderDeps =>
+	testDeps({ fg: (color, text) => `\x1b[${PALETTE[color] ?? "0"}m${text}\x1b[0m` });
+
+const DIFF = "--- a/notes.md\n+++ b/notes.md\n@@ -1,3 +1,3 @@\n context line\n-removed thing\n+added thing\n";
+const cardOf = (items: unknown[], extra: Record<string, unknown> = {}) => ({ kind: "diffs", items, ...extra });
+const itemOf = (over: Record<string, unknown> = {}) => ({
+	path: "notes.md",
+	added: 1,
+	removed: 1,
+	dryRun: false,
+	diff: DIFF,
+	...over,
+});
+const cardState = (card: unknown, overrides: Partial<ExecuteRenderState> = {}) =>
+	makeState({ expanded: true, details: { status: "ok", durationMs: 40, card }, ...overrides });
+
+describe("render-core: the diff card (Key 138)", () => {
+	test("readDiffCard carries droppedItems, and omits it when nothing was hidden", () => {
+		expect(readDiffCard(cardOf([itemOf()], { droppedItems: 3 }))?.droppedItems).toBe(3);
+		expect(readDiffCard(cardOf([itemOf()], { droppedItems: 0 }))?.droppedItems).toBeUndefined();
+		expect(readDiffCard(cardOf([itemOf()], { droppedItems: "three" }))?.droppedItems).toBeUndefined();
+	});
+
+	test("readDiffCard refuses junk instead of half-rendering it", () => {
+		for (const junk of [undefined, null, "diffs", [], { kind: "other", items: [] }, { kind: "diffs", items: "no" }, { kind: "diffs", items: [{ path: 1, diff: 2 }] }]) {
+			expect(readDiffCard(junk)).toBeUndefined();
+		}
+		expect(readDiffCard(cardOf([]))).toBeUndefined();
+	});
+
+	test("a card renders one header per file naming the path and its counts", () => {
+		const rows = stripAnsi(renderExecuteBody(cardState(cardOf([itemOf()])), 80, colorDeps()).join("\n"));
+		expect(rows).toContain("diff:");
+		expect(rows).toContain("notes.md");
+		expect(rows).toContain("+1");
+		expect(rows).toContain("−1");
+		expect(rows).toContain("removed thing");
+		expect(rows).toContain("added thing");
+	});
+
+	test("diff lines are coloured by role, not by whatever the blob colour was", () => {
+		const raw = renderExecuteBody(cardState(cardOf([itemOf()])), 120, colorDeps());
+		const rowFor = (needle: string) => raw.find((row) => stripAnsi(row).includes(needle)) ?? "";
+		expect(rowFor("added thing")).toContain("\x1b[32m"); // success
+		expect(rowFor("removed thing")).toContain("\x1b[31m"); // error
+		expect(rowFor("@@ -1,3 +1,3 @@")).toContain("\x1b[36m"); // accent
+		expect(rowFor("--- a/notes.md")).toContain("\x1b[2m"); // dim
+		expect(rowFor("+++ b/notes.md")).toContain("\x1b[2m");
+		expect(rowFor("context line")).toContain("\x1b[37m"); // toolOutput
+	});
+
+	test("a collapsed cell still shows the change: counts in the header, no body needed", () => {
+		const collapsed = makeState({ expanded: false, details: { status: "ok", durationMs: 40, card: cardOf([itemOf()]) } });
+		expect(stripAnsi(renderExecuteHeader(collapsed, 100, colorDeps())[0])).toContain("diff +1 −1");
+		const plain = makeState({ expanded: false });
+		expect(stripAnsi(renderExecuteHeader(plain, 100, colorDeps())[0])).not.toContain("diff +");
+	});
+
+	test("the collapsed counts sum across files", () => {
+		const two = makeState({
+			expanded: false,
+			details: { status: "ok", card: cardOf([itemOf({ added: 3, removed: 1 }), itemOf({ path: "other.py", added: 2, removed: 4 })]) },
+		});
+		expect(stripAnsi(renderExecuteHeader(two, 100, colorDeps())[0])).toContain("diff +5 −5");
+	});
+
+	test("a card that fails validation renders exactly the cell that had no card", () => {
+		const withJunk = stripAnsi(renderExecuteBody(cardState({ kind: "diffs", items: "not a list" }), 80, colorDeps()).join("\n"));
+		const without = stripAnsi(renderExecuteBody(cardState(undefined), 80, colorDeps()).join("\n"));
+		expect(withJunk).toBe(without);
+	});
+
+	test("the writer's bound is announced, so a partial card does not read as the whole change", () => {
+		const rows = stripAnsi(renderExecuteBody(cardState(cardOf([itemOf()], { droppedItems: 3 })), 80, colorDeps()).join("\n"));
+		expect(rows).toContain("3 more change(s) not shown");
+	});
+
+	test("the card is not counted in the ↓ line count — that path assumes an append-only blob", () => {
+		// Asserted as an equality against the same cell with no card, not against a number I picked:
+		// the count itself has a pre-existing quirk (a trailing newline counts as a line, so "one line\n"
+		// reports 2), and pinning that number here would make this test about someone else's bug.
+		const counts = (card: unknown) => {
+			const state = makeState({ expanded: false, details: { status: "ok", stdout: "one line\n", ...(card ? { card } : {}) } });
+			return stripAnsi(renderExecuteHeader(state, 120, colorDeps())[0]).match(/↓ \d+ lines/)?.[0];
+		};
+		expect(counts(cardOf([itemOf()]))).toBe(counts(undefined));
+		expect(counts(cardOf([itemOf({ diff: "x".repeat(4000) })]))).toBe(counts(undefined));
+	});
+
+	test("the card only asks for colours the theme actually has", () => {
+		// render.ts does `theme.fg(color as Parameters<Theme["fg"]>[0], text)` — the cast means TypeScript
+		// never checks a colour name, so a typo ("danger") renders uncoloured text and no layout test
+		// notices. Re-derive the real set with:
+		//   bun -e "const m=require('<pi-package>/dist/modes/interactive/theme/theme-tokens.js');\
+		//     console.log(Object.keys(m.THEME_TOKENS).filter(k=>m.THEME_TOKENS[k].slot==='foreground'))"
+		const seen = new Set<string>();
+		const deps = testDeps({
+			fg: (color, text) => {
+				seen.add(color);
+				return text;
+			},
+		});
+		renderExecuteBody(cardState(cardOf([itemOf({ dryRun: true })])), 80, deps);
+		expect([...seen].sort()).toEqual(["accent", "dim", "error", "success", "toolOutput", "warning"]);
+	});
+
+	test("a dry run is marked as one, and an empty diff says so rather than rendering nothing", () => {
+		const dry = stripAnsi(renderExecuteBody(cardState(cardOf([itemOf({ dryRun: true })])), 80, colorDeps()).join("\n"));
+		expect(dry).toContain("(dry run)");
+		const empty = stripAnsi(renderExecuteBody(cardState(cardOf([itemOf({ diff: "" })])), 80, colorDeps()).join("\n"));
+		expect(empty).toContain("(no diff text)");
+		expect(empty).toContain("notes.md");
+	});
+
+	test("a card alone is output: the cell does not say 'no output' underneath a rendered diff", () => {
+		const rows = stripAnsi(renderExecuteBody(cardState(cardOf([itemOf()])), 80, colorDeps()).join("\n"));
+		expect(rows).not.toContain("no output");
+	});
+
+	test("every diff row stays inside the width, including the long hunk headers", () => {
+		const wide = cardOf([itemOf({ diff: `@@ -${"9".repeat(60)} +${"9".repeat(60)} @@\n+${"x".repeat(200)}\n` })]);
+		for (const width of [20, 40, 80]) {
+			for (const row of renderExecuteBody(cardState(wide), width, colorDeps())) {
+				expect(stripAnsi(row).length, `width ${width}: ${stripAnsi(row)}`).toBeLessThanOrEqual(width);
+			}
+		}
 	});
 });
