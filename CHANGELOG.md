@@ -1,3 +1,15 @@
+## [Unreleased]
+
+### Changed
+
+- The evaluator venv is built with `--system-site-packages` (fork-local; upstream builds an isolated
+  venv). A personal REPL on a desktop box gains nothing from isolation, and it costs a second package
+  surface: every library a helper wants has to be installed into this venv as well as into the box.
+  Purely additive — the venv's own `site-packages` still precede the system's on `sys.path`, so no
+  package already installed in the venv changes version. One line in `scripts/setup-venv.mjs`; the
+  per-box undo is `include-system-site-packages = false` in `~/.pi/agent/pi-repl/venv/pyvenv.cfg`.
+  Only a *rebuilt* venv picks the flag up — `postinstall` repairs an existing one in place.
+
 ## [0.9.0] - 2026-09-29
 
 ### Added

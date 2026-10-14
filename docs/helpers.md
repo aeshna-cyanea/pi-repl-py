@@ -158,8 +158,11 @@ its `site-packages`. Packages you install there are importable from helpers and 
 import numpy as np
 ```
 
-That is how a helper reaches a package the repl does not ship by default (the venv is created
-minimal — it has no `requests`, `numpy`, `pandas`, etc.). ipykernel only pulls its own dependencies.
+That is how a helper reaches a package the repl does not ship by default: the venv itself is created
+minimal — ipykernel only pulls its own dependencies. (In this fork the venv is built with
+`--system-site-packages`, so whatever the system interpreter already has — often `numpy`, `requests`,
+`pandas` — is importable without any install. Installing into the venv still wins, because the venv's
+`site-packages` comes first on `sys.path`.)
 
 Because it is a project-local venv, the packages you add are personal to you: nothing about them
 ships with pi-repl. A helper that depends on a package runs only on machines that have installed

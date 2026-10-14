@@ -74,6 +74,12 @@ dependency. `jupyter_client` ships with ipykernel (the bridge drives the kernel 
 replaces on each update. If `python3` or the network is missing at install time, it prints a
 notice and the host falls back at runtime.
 
+**Fork note:** this fork builds the venv with `--system-site-packages`, so the system interpreter's
+distributions are importable from cells and helpers too. The venv's own `site-packages` still precede
+the system's on `sys.path`, so it is purely additive — nothing already installed in the venv changes
+version. Upstream builds an isolated venv; the flag is one line in `setup-venv.mjs` if you want that
+behaviour back.
+
 At spawn, `resolvePythonPath` uses exactly one interpreter: the install venv, else `$PYTHON` /
 `python3`. It never auto-picks a repo or cwd `.venv` — such a venv may lack ipykernel, which
 killed the kernel whenever cwd happened to contain one. The kernel starts in the session's cwd

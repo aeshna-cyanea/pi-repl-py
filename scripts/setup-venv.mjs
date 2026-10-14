@@ -77,8 +77,14 @@ function main() {
   log(`building evaluator venv at ${VENV_DIR} (uses ${systemPython})...`);
   try {
     mkdirSync(join(VENV_DIR, ".."), { recursive: true });
-    // flush a half-built venv so pip starts from a clean, knowable slate
-    execSync(`${systemPython} -m venv --clear ${VENV_DIR}`, { stdio: "inherit" });
+    // flush a half-built venv so pip starts from a clean, knowable slate.
+    // `--system-site-packages` is a fork-local default, not upstream's: the evaluator is a personal
+    // REPL on a desktop box, and isolation from the system interpreter buys it nothing there — it
+    // only means every package a helper wants must be pip-installed into this venv on top of
+    // whatever the box already has. The venv's own site-packages still come first on sys.path, so
+    // inheritance is purely additive: nothing installed here changes version. Undo per-box without
+    // rebuilding: set `include-system-site-packages = false` in the venv's pyvenv.cfg.
+    execSync(`${systemPython} -m venv --clear --system-site-packages ${VENV_DIR}`, { stdio: "inherit" });
     execSync(`${PY} -m pip install --upgrade pip`, { stdio: "inherit" });
     execSync(`${PY} -m pip install ${DEPS.join(" ")}`, { stdio: "inherit" });
     if (!depsOk()) {
