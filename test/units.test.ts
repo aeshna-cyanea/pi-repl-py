@@ -204,8 +204,15 @@ describe("helper boot announcements", () => {
 			expect(block).toContain("Preloaded helpers");
 			expect(block).toContain("web(q) the PROJECT version.");
 		});
+		// "absent" needs *no* helpers anywhere. The global tier falls back to the real
+		// ~/.pi/agent/pi-repl/helpers on whatever machine runs the suite, so an unisolated call
+		// advertises whoever's helpers happen to be installed there. The claim under test is "an
+		// empty corpus advertises nothing", not "this machine has no helpers".
 		const empty = mkdtempSync(join(tmpdir(), "pi-repl-sec-empty-"));
-		expect(buildHelpersPromptSection(empty)).toBeUndefined();
+		const emptyGlobal = mkdtempSync(join(tmpdir(), "pi-repl-sec-empty-global-"));
+		withEnv("PI_HELPERS_GLOBAL_DIR", emptyGlobal, () => {
+			expect(buildHelpersPromptSection(empty)).toBeUndefined();
+		});
 	});
 
 	test("PI_HELPERS_DIR replaces the whole tier list in the prompt section, like the kernel", () => {
