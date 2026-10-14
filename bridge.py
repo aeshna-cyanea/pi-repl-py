@@ -12,7 +12,15 @@ Protocol (JSON lines; host -> bridge on stdin, bridge -> host on stdout):
   out: {"type":"ready","helpers":[{"name":str,"ok":bool,"error":str?}]}      kernel up, helpers loaded
        {"type":"stream","id":str,"name":"stdout"|"stderr","text":str}        cell output, streamed
        {"type":"result","id":str,"status":"ok"|"error"|"aborted",            cell settled
-              "result":str?,"error":{"name":str,"message":str,"stack":[str]}?}
+              "result":str?,"error":{...}?,"card":obj?}
+
+The `card` is a display side-channel (Key 138): a kernel function — patch() today — that wants the
+human to see its artifact as something other than a text blob writes one JSON object to the file named
+by the injected global PAN_CARD_PATH, and the bridge reads and clears it after the cell settles. It is a
+file rather than a protocol message because the streaming path is byte-for-byte my own stdout: anything
+injected there is a marker that can collide with real output. Cost when no helper wrote one is one stat.
+The bridge tells the kernel the path at boot instead of letting the helper derive it, so an older bridge
+(or a kernel started outside it) degrades to plain printing rather than breaking the helper.
        {"type":"reply","id":str,"..."}                                       snapshot/restore/names/shutdown
        {"type":"error","id":str?,"message":str}                              protocol-level failure
        {"type":"dying","message":str?}                                       best-effort before exit(1)
@@ -25,6 +33,7 @@ rebuilds from the last snapshot. stdin EOF (host gone) shuts the kernel down cle
 import json
 import os
 import queue
+import tempfile
 import sys
 import threading
 import time
@@ -138,6 +147,7 @@ class Bridge:
         self.last_bytes = 0
         self.pending_check = False # a cell just completed; the gate owes a name diff
         self.deferred_restore = None  # background revive: runs at the first quiet gap
+        self.card_path = None        # display side-channel, set at boot (see the protocol note above)
 
     # ----- IO -----
 
@@ -347,10 +357,44 @@ class Bridge:
             return
         self._write_snapshot(self.policy["path"], self.policy["max_bytes"], names)
 
+    def _inject_card_path(self):
+        """Tell the kernel where to leave a display card. Injected as a global rather than derived by
+        the helper, because the helper cannot know the bridge's pid and the bridge must not guess the
+        kernel's. One file per bridge process, so concurrent sessions cannot read each other's cards."""
+        self.card_path = os.path.join(tempfile.gettempdir(), f"pi-repl-card-{os.getpid()}.json")
+        self.run_cell(f"PAN_CARD_PATH = {self.card_path!r}", emit_stream=False)
+
+    def _take_card(self, cell_id):
+        """Read and clear the card a kernel function left for the TUI.
+
+        Never fails the cell that made it: a card is a display nicety, and a guard that turns a
+        rendering idea into a cell error is the wrong kind of strict. A half-written file is also why
+        the writer writes to a temp name and renames — the read here assumes that.
+        """
+        path = self.card_path
+        if not path:
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            self.emit({"type": "stream", "id": cell_id, "name": "stderr",
+                       "text": f"[card] ignored: {type(exc).__name__}: {exc}\n"})
+            return None
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return data if isinstance(data, dict) else None
+
     def op_boot(self, boot):
         self.helper_names = [h["name"] for h in boot.get("helpers") or []]
         self.policy = boot.get("snapshot")
         self.start_kernel()
+        self._inject_card_path()
         report = []
         for h in boot.get("helpers") or []:
             res = self.run_cell(h["source"], emit_stream=False)
@@ -369,6 +413,9 @@ class Bridge:
             out["result"] = res["result"]
         if res["error"] is not None:
             out["error"] = res["error"]
+        card = self._take_card(op["id"])
+        if card is not None:
+            out["card"] = card
         self.emit(out)
 
     def _write_snapshot(self, path, max_bytes, names=None):

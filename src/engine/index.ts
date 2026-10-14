@@ -41,6 +41,8 @@ export interface ExecuteResult {
 	status: "ok" | "error" | "aborted";
 	error?: EngineExecuteError;
 	durationMs: number;
+	/** Carried through from the bridge untouched — see `CellResult.card`. */
+	card?: unknown;
 }
 
 export interface ExecuteOptions {
@@ -372,6 +374,11 @@ export class EngineManager {
 					stderr: finalize(r.stderr, r.truncated?.stderr ?? false),
 					result: r.result !== undefined ? finalize(String(r.result), String(r.result).length > maxChars) : undefined,
 					error: r.error,
+					// NOT finalized: stdout/stderr/result get truncated against a byte cap because they can
+					// be 45 KB of stream. A card is written by a helper that chose to write it, and truncating
+					// a diff mid-hunk renders a change that does not exist — so the render edge bounds what is
+					// shown, and this layer does not silently rewrite the artifact.
+					card: r.card,
 					status,
 					durationMs: Date.now() - started,
 				};

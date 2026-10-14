@@ -306,6 +306,7 @@ export default function (pi: ExtensionAPI) {
 					status: r.status,
 					durationMs: r.durationMs,
 					errorName: r.error?.name,
+					card: r.card,
 					stdout: r.stdout || undefined,
 					stderr: r.stderr || undefined,
 					result: r.result,

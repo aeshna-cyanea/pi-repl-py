@@ -1,7 +1,52 @@
 /** Pure layout, free of pi imports so unit tests drive it directly. */
 
+/**
+ * One file's worth of unified diff, produced by a kernel function that wanted the human to see it as a
+ * diff (Key 138). `diff` is the unified text; the counts are what the collapsed header shows, so they
+ * are computed by the writer and not re-derived from a truncated render.
+ */
+export interface DiffCardItem {
+	path: string;
+	added: number;
+	removed: number;
+	dryRun?: boolean;
+	diff: string;
+}
+
+export interface DiffCard {
+	kind: "diffs";
+	items: DiffCardItem[];
+}
+
+/**
+ * Validate a card that arrived as JSON from the bridge. The writer is Python and the reader is here, so
+ * the type is a contract, not a guarantee — anything malformed falls back to `undefined`, which renders
+ * exactly what this looked like before the card existed. A display nicety must be able to fail silently
+ * without taking the cell's output down with it.
+ */
+export function readDiffCard(value: unknown): DiffCard | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const card = value as { kind?: unknown; items?: unknown };
+	if (card.kind !== "diffs" || !Array.isArray(card.items)) return undefined;
+	const items = card.items.flatMap((item): DiffCardItem[] => {
+		if (!item || typeof item !== "object") return [];
+		const it = item as { path?: unknown; added?: unknown; removed?: unknown; dryRun?: unknown; diff?: unknown };
+		if (typeof it.path !== "string" || typeof it.diff !== "string") return [];
+		return [{
+			path: it.path,
+			added: Number.isFinite(it.added) ? Number(it.added) : 0,
+			removed: Number.isFinite(it.removed) ? Number(it.removed) : 0,
+			...(it.dryRun === true ? { dryRun: true } : {}),
+			diff: it.diff,
+		}];
+	});
+	return items.length > 0 ? { kind: "diffs", items } : undefined;
+}
+
 export interface ExecuteDetails {
 	status?: "ok" | "error" | "aborted" | string;
+	/** Untrusted until `readDiffCard` says otherwise. */
+	card?: unknown;
 	durationMs?: number;
 	errorName?: string;
 	stdout?: string;

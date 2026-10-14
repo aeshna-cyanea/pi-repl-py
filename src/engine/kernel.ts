@@ -27,6 +27,13 @@ export interface CellResult {
 	error?: { name: string; message: string; stack: string[] };
 	status: "ok" | "error" | "aborted";
 	truncated?: { stdout: boolean; stderr: boolean };
+	/**
+	 * A display card a kernel function asked for (Key 138) — patch() writes one so the TUI can show a
+	 * diff as a diff. Shape is the writer's business and is validated at the render edge, not here: the
+	 * engine only carries it, because a kernel that can invent a card kind should not need an engine
+	 * change to do it.
+	 */
+	card?: unknown;
 }
 
 export interface CellOptions {
@@ -69,6 +76,7 @@ interface ActiveCell {
 	maxChars: number;
 	result?: string;
 	error?: { name: string; message: string; stack: string[] };
+	card?: unknown;
 	status: CellResult["status"];
 	lastActivity: number;
 	timedOut: boolean;
@@ -352,8 +360,10 @@ export class KernelClient {
 			status?: string;
 			result?: string;
 			error?: { name?: string; message?: string; stack?: string[] };
+			card?: unknown;
 		};
 		if (content.result !== undefined) active.result = content.result;
+		if (content.card !== undefined) active.card = content.card;
 		if (content.error) {
 			active.error = {
 				name: content.error.name ?? "Error",
@@ -380,6 +390,7 @@ export class KernelClient {
 			stderr: active.stderr.join(""),
 			result: active.result,
 			error: active.error,
+			card: active.card,
 			status,
 			truncated: { stdout: active.stdoutTruncated, stderr: active.stderrTruncated },
 		});
