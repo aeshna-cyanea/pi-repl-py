@@ -36,17 +36,25 @@ switch back). The flag only decides where a session starts; the command handles 
 
 ## What repl mode does to the tool surface
 
-`/repl on` collapses **Pi's own built-in tools** — `read`, `bash`, `edit`, `write`, `grep`, `find`,
-`ls`, `powershell` — because a Python kernel genuinely replaces them (argv lists beat a quoting
-layer; `open()` plus a checked anchor beats a silent no-op). Everything **another extension**
+`/repl on` collapses **Pi's own built-in tools** — `bash`, `write`, `grep`, `find`, `ls`,
+`powershell` — because a Python kernel genuinely replaces them (argv lists beat a quoting
+layer; `open()` plus a checked anchor beats a silent no-op). Two built-ins deliberately **stay**,
+and the reason each one stays is the test of the rule:
+
+- **`read`** is the only channel for a non-text modality. A cell can `open(p, "rb").read()`, but bytes
+  are not an image — Pi's `read` is what hands a jpeg to the model's vision encoder. Dropping it did
+  not replace a job the kernel does better, it deleted a capability the kernel cannot provide.
+- **`edit`** lives alongside the kernel's `patch()` until `patch()` reaches parity (several anchors,
+  one file, one atomic write, one diff).
+
+Everything **another extension**
 registers stays active: context tools, question tools, live-status tools. Repl mode has no opinion
 about tools it did not replace, so nothing an extension relies on vanishes silently.
 
 Two consequences worth knowing:
 
-- The axis is **names, not provenance**. If another extension wraps `read`/`bash`/`edit`/`write`
-  (pi-ssh-remote does), those wrapped copies are pruned too — the kernel replaces the job, not the
-  author.
+- The axis is **names, not provenance**. If another extension wraps `bash`/`write`/`grep`, those
+  wrapped copies are pruned too — the kernel replaces the job, not the author.
 - The `/repl on` toast **names what it dropped and what it kept**, so a tool that is missing later
   is a name you already saw rather than a mystery.
 

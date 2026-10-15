@@ -749,14 +749,18 @@ describe("repl tool surface: prune Pi's built-ins, never another extension's too
 	const STOCK = ["read", "bash", "edit", "write", "codemode", "llama_slots", "sessions", "ask_user_question", "remote", "context_checkpoint", "context_timeline", "context_compact"];
 
 	test("the prune drops Pi's built-ins and leaves every extension tool active", () => {
-		expect(prunedLoadout(STOCK)).toEqual(["execute", "codemode", "llama_slots", "sessions", "ask_user_question", "remote", "context_checkpoint", "context_timeline", "context_compact"]);
+		expect(prunedLoadout(STOCK)).toEqual(["execute", "read", "edit", "codemode", "llama_slots", "sessions", "ask_user_question", "remote", "context_checkpoint", "context_timeline", "context_compact"]);
 	});
 
-	test("the four built-ins are pruned by NAME, not by provenance", () => {
+	test("built-ins are pruned by NAME, not by provenance", () => {
 		// pi-ssh-remote wraps read/bash/edit/write, so on a box that installs it those four carry
 		// sourceInfo "npm:pi-ssh-remote". Pruning by source would keep the wrapped copies — edit
 		// alone costs 1,180 B of schema+description — and would drop nothing the kernel replaces.
-		expect(prunedLoadout(["read", "bash", "edit", "write"])).toEqual(["execute"]);
+		// bash/write still go by name; read and edit survive for their own reasons (the modality
+		// channel, and patch() not yet at parity) — see BUILTIN_TOOL_NAMES in repl-command.ts.
+		expect(prunedLoadout(["read", "bash", "edit", "write"])).toEqual(["execute", "read", "edit"]);
+		// a wrapped copy of a name that IS replaced is pruned exactly like Pi's own
+		expect(prunedLoadout(["bash", "write"])).toEqual(["execute"]);
 	});
 
 	test("the operator drop list removes named extension tools, and can never remove execute", () => {
@@ -770,17 +774,26 @@ describe("repl tool surface: prune Pi's built-ins, never another extension's too
 	test("the toast names what the prune took, so a lost tool is visible instead of inferred", () => {
 		const next = prunedLoadout(STOCK, ["sessions", "remote"]);
 		const dropped = droppedToolNames(STOCK, next);
-		expect(dropped).toEqual(["read", "bash", "edit", "write", "sessions", "remote"]);
+		expect(dropped).toEqual(["bash", "write", "sessions", "remote"]);
 		const toast = replToast("on", dropped, next);
-		expect(toast).toContain("dropped: read bash edit write sessions remote");
+		expect(toast).toContain("dropped: bash write sessions remote");
 		expect(toast).toContain("kept:");
 		expect(toast).toContain("context_timeline");
+		// and the modality channel is named as KEPT, because a jpeg reaching me is not a nicety
+		expect(toast).toContain("read");
 		// the point of the rule, said out loud: it is Pi's built-ins that go inactive
 		expect(toast).toContain("Pi's built-in tools");
 	});
 
 	test("BUILTIN_TOOL_NAMES covers the names the kernel replaces, and not the ones it does not", () => {
-		for (const name of ["read", "bash", "edit", "write"]) expect(BUILTIN_TOOL_NAMES).toContain(name);
+		for (const name of ["bash", "write", "grep", "find", "ls", "powershell"]) expect(BUILTIN_TOOL_NAMES).toContain(name);
+		// Pinned OUT on purpose, 2026-10-14, so nothing silently puts them back:
+		//  - read is the only route to a non-text modality — a cell can read bytes, but only Pi's read
+		//    hands an image to the model's vision encoder, so the kernel does not replace that job;
+		//  - edit stays alongside patch() until patch() reaches parity (several anchors, one file, one
+		//    atomic write, one diff).
+		expect(BUILTIN_TOOL_NAMES).not.toContain("read");
+		expect(BUILTIN_TOOL_NAMES).not.toContain("edit");
 		// codemode is a composition surface (and today the only programmatic route to extension tools
 		// from a cell), so repl mode must not prune it
 		expect(BUILTIN_TOOL_NAMES).not.toContain("codemode");

@@ -25,6 +25,17 @@ export function replUsageMessage(replMode: boolean): string {
  * open()/str.replace() beat a quoting layer and a no-op-on-a-typo anchor). Everything else an
  * extension registers stays active in repl mode, because repl mode has no opinion about it.
  *
+ * Two names LEFT this list on 2026-10-14, and each one's reason for leaving is a test of the
+ * criterion itself, so it is written here rather than in a commit message:
+ *  - **`read` is the only channel for a non-text modality.** A cell can `open(p, "rb").read()`, but
+ *    bytes are not an image: Pi's `read` is what hands a jpeg/png to the model's vision encoder
+ *    (`downgradeUnsupportedImages()` gates on `model.input`, and the image block reaches the model
+ *    only through Pi's own tool). Dropping `read` did not replace a job the kernel does better — it
+ *    deleted a capability the kernel cannot provide at all, which fails this list's own test.
+ *  - **`edit` stays alongside the kernel's `patch()` until `patch()` reaches parity** — several
+ *    anchors, one file, one atomic write, one diff is still open upstream (Key 168). Pruning Pi's
+ *    tool while the replacement is half-built is how a half-built surface becomes the only surface.
+ *
  * Deliberately NOT in this list: `codemode` and `tool_search` (built-in *extensions*, not built-in
  * tools — codemode is a composition surface, not a file/shell tool), and `execute` itself.
  *
@@ -32,10 +43,11 @@ export function replUsageMessage(replMode: boolean): string {
  * sourceInfo "npm:pi-ssh-remote" on a box that has it installed, and pruning by source would keep
  * the wrapped (and more expensive) copies. Pi exports no constant for this set to extensions —
  * DEFAULT_TOOL_NAMES (dist/core/settings-manager.js) is only the four defaults, while grep/find/ls/
- * powershell live in allToolNames — so this list is ours to keep in step, and the test pins the four
- * names the kernel actually replaces so a Pi rename cannot silently stop the prune.
+ * powershell live in allToolNames — so this list is ours to keep in step. The test pins both halves:
+ * the names the kernel replaces, **and** `read`/`edit` as absent, so a future refactor (or a Pi
+ * rename) cannot silently put the modality channel back on the pruning list.
  */
-export const BUILTIN_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"];
+export const BUILTIN_TOOL_NAMES: readonly string[] = ["bash", "write", "grep", "find", "ls", "powershell"];
 
 export const EXECUTE_TOOL = "execute";
 
