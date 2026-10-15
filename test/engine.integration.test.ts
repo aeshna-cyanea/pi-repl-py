@@ -27,8 +27,30 @@ function tempDir(): string {
 	return d;
 }
 
+/**
+ * Helper isolation. A kernel built with no env override resolves helpers from the OPERATOR's real
+ * `~/.pi/agent/pi-repl/helpers` (helpers-locate.ts falls back to it), so on any box that actually has
+ * helpers — mine does — every snapshot test suddenly snapshots somebody else's namespace. That was
+ * silently costing two red tests: "bindings skipped at save time" found `Git`, `G` and `cap` in
+ * `saved` instead of the test's own `kept`, and the /fork'd test revived 60 names including four
+ * functions that cannot be pickled. Same class as the units-suite isolation fix, one layer down.
+ * Tests that mean to exercise helper resolution pass PI_HELPERS_DIR / PI_HELPERS_GLOBAL_DIR
+ * themselves; this default only covers the ones that never meant to load helpers at all.
+ */
+let isolatedHelpersDir: string | undefined;
+function isolatedHelpers(): string {
+	if (isolatedHelpersDir === undefined) isolatedHelpersDir = mkdtempSync(join(tmpdir(), "pi-repl-nohelpers-"));
+	return isolatedHelpersDir;
+}
+
+function withHelperIsolation(opts: Record<string, unknown>): Record<string, unknown> {
+	const given = (opts.env ?? {}) as Record<string, unknown>;
+	if (given.PI_HELPERS_DIR !== undefined || given.PI_HELPERS_GLOBAL_DIR !== undefined) return opts;
+	return { ...opts, env: { ...given, PI_HELPERS_GLOBAL_DIR: isolatedHelpers() } };
+}
+
 function engine(opts: Record<string, unknown>) {
-	const m = new EngineManager(opts as never);
+	const m = new EngineManager(withHelperIsolation(opts) as never);
 	engines.push(m);
 	return m;
 }
@@ -68,6 +90,7 @@ afterEach(async () => {
 afterAll(async () => {
 	await Promise.allSettled(engines.splice(0).map((m) => m.kill()));
 	for (const d of tempDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+	if (isolatedHelpersDir !== undefined) rmSync(isolatedHelpersDir, { recursive: true, force: true });
 });
 
 describe("host × python-kernel integration", () => {
@@ -480,7 +503,8 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 
 			// the lifecycle path, exactly as index.ts drives it
 			const lifecycle = new EngineLifecycle<EngineManager>({
-				create: () => new EngineManager({ cwd: d, snapshot: { path: forkSnap, debounceMs: 100 }, forkInherited: true }),
+create: () =>
+					new EngineManager(withHelperIsolation({ cwd: d, snapshot: { path: forkSnap, debounceMs: 100 }, forkInherited: true }) as never),
 				dispose: async (e) => e.kill(),
 			});
 			const { engine: m2 } = await lifecycle.acquire("startup", "fork-conv");
@@ -840,4 +864,80 @@ result_${i}`);
 		expect(r.status).toBe("ok");
 		expect(r.result).toContain("7");
 	});
+
+	// --- the display card channel (Grist Key 138) -------------------------------------------------
+	// A card is one JSON object a kernel function publishes on the kernel's own display channel under
+	// application/vnd.pi-repl.card+json. The bridge picks it up from iopub and attaches it to the result
+	// of the cell that published it; the TUI renders it. It used to be a file, and the file is what
+	// caused the bug the file was meant to prevent — see the second test below, which is that bug.
+
+	test("a kernel function's card reaches the host on the cell that made it", { timeout: 60_000 }, async () => {
+		const d = tempDir();
+		const m = engine({ cwd: d });
+		const r = await m.execute(
+			"display({'application/vnd.pi-repl.card+json': {'kind':'diffs','items':[{'path':'a.txt','added':2,'removed':1,'dryRun':False,'diff':'-x +y'}]}}, raw=True)\n1 + 1",
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("2");
+		expect(r.card).toEqual({ kind: "diffs", items: [{ path: "a.txt", added: 2, removed: 1, dryRun: false, diff: "-x +y" }] });
+	});
+
+	test("a card is scoped to its own cell: the next cell carries none", { timeout: 60_000 }, async () => {
+		// The file channel got this by reading and unlinking between cells — implicit, and order-dependent.
+		// run_cell filters iopub by the cell's msg_id, so the pairing is structural: nothing to clear.
+		const d = tempDir();
+		const m = engine({ cwd: d });
+		const withCard = await m.execute(
+			"display({'application/vnd.pi-repl.card+json': {'kind':'diffs','items':[{'path':'a.txt','added':1,'removed':0,'dryRun':False,'diff':'+y'}]}}, raw=True)",
+		);
+		expect(withCard.card).toBeDefined();
+		const without = await m.execute("2 + 2");
+		expect(without.result).toContain("4");
+		expect(without.card).toBeUndefined();
+	});
+
+	test("the card channel survives a snapshot restore (Key 138's own bug)", { timeout: 90_000 }, async () => {
+		// The channel used to be a file, and a file needs a path, and the path reached the kernel as a
+		// global injected at boot — `PAN_CARD_PATH`. Namespace state is snapshotted, so a kernel revived
+		// after a resume, a /fork, or a wedged-kernel rebuild kept writing cards to the DEAD bridge's
+		// path, and every card in that session vanished silently forever (`_take_card` treats a missing
+		// file as normal). Measured at the time: card in a fresh kernel, card undefined after restoreState.
+		// The display channel has no path to go stale, so a restored kernel renders like a fresh one.
+		const d = tempDir();
+		const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+		const m1 = engine({ cwd: d, snapshot: snap });
+		await m1.execute("kept = {'resumed': True}");
+		await m1.snapshotState();
+		await m1.kill();
+
+		const m2 = engine({ cwd: d, snapshot: snap });
+		const restore = await m2.restoreState();
+		expect(restore?.restored).toContain("kept");
+		// the injected global is gone from the namespace entirely, which is also why the /fork'd toast
+		// now counts the names it actually inherited
+		expect(restore?.restored).not.toContain("PAN_CARD_PATH");
+		const r = await m2.execute(
+			"display({'application/vnd.pi-repl.card+json': {'kind':'diffs','items':[{'path':'b.txt','added':1,'removed':1,'dryRun':False,'diff':'-p +q'}]}}, raw=True)\nprint(kept['resumed'])",
+		);
+		expect(r.stdout).toContain("True");
+		expect(r.card).toEqual({ kind: "diffs", items: [{ path: "b.txt", added: 1, removed: 1, dryRun: false, diff: "-p +q" }] });
+	});
+
+	test("a card that is not a JSON object is dropped, and the cell is untouched", { timeout: 60_000 }, async () => {
+		// Fail-open at the boundary: a card is whatever a kernel function chose to publish, so the bridge
+		// passes on objects only and the host's validator decides the rest. A bad card must never become a
+		// cell error, and must never swallow the cell's real output.
+		const d = tempDir();
+		const m = engine({ cwd: d });
+		const r = await m.execute(
+			"display({'application/vnd.pi-repl.card+json': 'not an object'}, raw=True)\nprint('still here')",
+		);
+		expect(r.status).toBe("ok");
+		expect(r.stdout).toContain("still here");
+		expect(r.card).toBeUndefined();
+	});
+
+	// The "cost when nothing is published" property is a wire-level claim, not an engine-level one: the
+	// bridge omits the `card` key entirely (op_exec), while the engine always carries it as undefined.
+	// Nothing here can see the difference, so nothing here pretends to pin it.
 });
