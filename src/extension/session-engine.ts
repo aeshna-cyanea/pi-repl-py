@@ -1,6 +1,6 @@
 // Lifecycle: boot, session binding, reset announcements. Recovery is a background quiet-gap job; the notice lands on the first cell after the restore.
 
-import { DEFAULT_BOOT_TIMEOUT_MS, type HelperLoadResult, type RestoreResult } from "../engine/index.js";
+import { DEFAULT_BOOT_TIMEOUT_MS, type HelperLoadResult, type RestoreResult, type SnapshotResult } from "../engine/index.js";
 
 /** Show enough names to orient, then count the rest (a revive can carry hundreds). */
 function summarizeNames(names: readonly string[], limit: number): string {
@@ -18,6 +18,11 @@ export interface RevivableEngine {
 	restoreWasSkipped(): boolean;
 	/** True when this conversation's state dir already exists, so the engine was resumed. */
 	hasSnapshotHistory(): boolean;
+	/**
+	 * Flush the live namespace to this engine's snapshot path. Present on EngineManager; a fake may
+	 * omit it, and a restart without it simply reports "nothing flushed" instead of lying.
+	 */
+	snapshotState?(): Promise<SnapshotResult | null>;
 }
 
 export interface EngineLifecycleDeps<E extends RevivableEngine> {
@@ -145,6 +150,12 @@ export class EngineLifecycle<E extends RevivableEngine> {
 	private acquiring?: Promise<{ engine: E; restore: RestoreResult | null; created: boolean }>;
 	/** The conversation this engine was built for; a different key on acquire tears it down. */
 	private boundKey?: string;
+	/**
+	 * One-shot: the next create() skips the snapshot revive. Set by restart({ restore: false }) — the
+	 * verb that fixes a poisoned namespace. It belongs to the created EngineManager from then on, so a
+	 * kernel that later dies mid-session stays empty rather than quietly resurrecting the old names.
+	 */
+	private skipRestoreOnce = false;
 
 	constructor(private readonly deps: EngineLifecycleDeps<E>) {}
 
@@ -181,7 +192,8 @@ export class EngineLifecycle<E extends RevivableEngine> {
 			}
 			this.boundKey = sessionKey;
 			const deadline = this.deps.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
-			let engine = this.deps.create();
+			let engine = this.deps.create(this.skipRestoreOnce);
+			this.skipRestoreOnce = false;
 			this.engine = engine;
 			let booted = await this.bootOnce(engine, deadline);
 			if (!booted) {
@@ -223,6 +235,11 @@ export class EngineLifecycle<E extends RevivableEngine> {
 		}
 	}
 
+	/** The live engine, if any. `repl status` must be able to look without booting a kernel. */
+	get current(): E | undefined {
+		return this.engine;
+	}
+
 	/** The pending reset notice, taken exactly once. */
 	takeResetNotice():
 		| { notice: string; origin: AcquireOrigin; restore: RestoreResult | null; wedged: boolean }
@@ -242,6 +259,27 @@ export class EngineLifecycle<E extends RevivableEngine> {
 	/** Kill-then-rebuild for a wedged engine; skips the final snapshot flush, uses the last good one. */
 	async discard(): Promise<void> {
 		await this.teardownWith((engine) => (this.deps.discard ?? this.deps.dispose)(engine));
+	}
+
+	/**
+	 * A deliberate restart, asked for from outside the kernel: flush what is live, tear the engine down,
+	 * boot a new one. `restore: false` boots it EMPTY.
+	 *
+	 * The flush happens before the teardown even when restoring, because the point of the verb is that
+	 * the namespace at restart time is the one worth keeping — a snapshot taken after a poisoned kernel
+	 * has been running for another ten minutes is not. Teardown then goes through discard, so the flush
+	 * is not paid twice.
+	 */
+	async restart(opts: { flush: boolean; restore: boolean }, sessionKey?: string): Promise<{ flushed: SnapshotResult | null }> {
+		const engine = this.engine;
+		let flushed: SnapshotResult | null = null;
+		if (engine && opts.flush && typeof engine.snapshotState === "function") {
+			flushed = await engine.snapshotState().catch(() => null);
+		}
+		await this.teardownWith((e) => (this.deps.discard ?? this.deps.dispose)(e));
+		this.skipRestoreOnce = !opts.restore;
+		await this.acquire("cell", sessionKey);
+		return { flushed };
 	}
 
 	private async teardownWith(run: (engine: E) => Promise<void>): Promise<void> {

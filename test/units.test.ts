@@ -47,6 +47,20 @@ import {
 } from "../src/extension/session-engine.js";
 import { BUILTIN_TOOL_NAMES, droppedToolNames, parseReplToggle, prunedLoadout, replArgumentCompletions, replToast, replUsageMessage, restoredTools } from "../src/extension/repl-command.js";
 import { DEFAULT_REPL_CONFIG, loadReplConfig, parseReplConfig, startEngaged } from "../src/extension/repl-config.js";
+import {
+	type Drift,
+	diffHelpers,
+	formatReload,
+	formatStatus,
+	isEmptyDrift,
+	planRestart,
+	reloadCell,
+	restartBlockedNotice,
+	restartMarker,
+	restartToast,
+	type StatusFacts,
+	validateReplParams,
+} from "../src/extension/repl-tool.js";
 import { withSkillsBlock } from "../src/extension/skill-hook.js";
 import {
 	forkParentSnapshot,
@@ -1732,5 +1746,247 @@ describe("render-core: the diff card (Key 138)", () => {
 				expect(stripAnsi(row).length, `width ${width}: ${stripAnsi(row)}`).toBeLessThanOrEqual(width);
 			}
 		}
+	});
+});
+
+describe("the repl tool: what the three verbs mean, and what they refuse", () => {
+	// --- pure policy, no kernel: this is the half index.ts cannot be tested for, and the half where a
+	// --- wrong answer costs the reader a re-derivation. Every refusal below is asserted to name the
+	// --- repair, because that is what makes a refusal a cheap correction instead of a tax. ---
+
+	test("a bare repl call says which actions exist", () => {
+		const d = validateReplParams({});
+		expect(d.ok).toBe(false);
+		if (!d.ok) expect(d.error).toContain("status | reload | restart");
+	});
+
+	test("a near-miss action is answered with the list, not with a shrug", () => {
+		const d = validateReplParams({ action: "restar" });
+		expect(d.ok).toBe(false);
+		if (!d.ok) {
+			expect(d.error).toContain('"restar"');
+			expect(d.error).toContain("expected status | reload | restart");
+		}
+	});
+
+	test("fresh on a non-restart is refused by name, because it would silently do nothing", () => {
+		const d = validateReplParams({ action: "status", fresh: true });
+		expect(d.ok).toBe(false);
+		if (!d.ok) expect(d.error).toContain('only means anything with action "restart"');
+	});
+
+	test("fresh must be a boolean, and a long reason says by how much it is over", () => {
+		const bad = validateReplParams({ action: "restart", fresh: "yes" });
+		expect(!bad.ok && !bad.ok && bad.error).toContain("fresh must be a boolean");
+		const long = validateReplParams({ action: "restart", reason: "x".repeat(201) });
+		expect(!long.ok && !long.ok && long.error).toContain("201 chars");
+	});
+
+	test("a reason is trimmed and kept; a non-object params is refused", () => {
+		const ok = validateReplParams({ action: "restart", reason: "  poisoned namespace  " });
+		expect(ok.ok && ok.ok && ok.params.reason).toBe("poisoned namespace");
+		const nope = validateReplParams(null);
+		expect(!nope.ok && !nope.ok && nope.error).toContain("takes an object");
+	});
+
+	test("diffHelpers separates new, gone, changed and identical", () => {
+		const adv = [
+			{ name: "capture", description: "cap()" },
+			{ name: "git", description: "old words" },
+			{ name: "gone", description: "still advertised" },
+		];
+		const disk = [
+			{ name: "capture", description: "cap()" },
+			{ name: "git", description: "new words" },
+			{ name: "fresh", description: "just added" },
+		];
+		const d = diffHelpers(adv, disk);
+		expect(d.added).toEqual(["fresh"]);
+		expect(d.removed).toEqual(["gone"]);
+		expect(d.changed).toEqual(["git"]);
+		expect(d.same).toBe(1);
+		expect(isEmptyDrift(d)).toBe(false);
+		expect(isEmptyDrift(diffHelpers(disk, disk))).toBe(true);
+	});
+
+	const facts = (over: Partial<StatusFacts> = {}): StatusFacts => ({
+		replMode: true,
+		engine: { running: true, forkInherited: false, restoreSkipped: false, hasSnapshotHistory: false, names: 12 },
+		snapshot: { path: "/tmp/state/ns.snapshot", exists: true, ageMs: 5_000, bytes: 1234 },
+		helpers: {
+			files: [
+				{ name: "capture", description: "cap()", path: "/h/capture.py", bytes: 3181, mtimeMs: Date.now() },
+				{ name: "novocab", description: "", path: "/h/novocab.py", bytes: 10, mtimeMs: Date.now() },
+			],
+			advertised: [{ name: "capture", chars: 8 }],
+			blockChars: 400,
+			advertisedAt: Date.now() - 60_000,
+		},
+		wire: { requests: 3, systemChars: 100, toolsChars: 200, payloadChars: 300, at: Date.now() },
+		drift: { added: [], removed: [], changed: [], same: 1 },
+		activeTools: ["execute", "read"],
+		...over,
+	});
+
+	test("status reports drift by name, and says so plainly when there is none", () => {
+		const drift: Drift = { added: ["fresh"], removed: [], changed: ["git"], same: 1 };
+		const withDrift = formatStatus(facts({ drift }));
+		expect(withDrift).toContain("DRIFT between advertised and disk");
+		expect(withDrift).toContain("new on disk, not advertised yet: fresh");
+		expect(withDrift).toContain("description changed: git");
+		expect(formatStatus(facts())).toContain("advertised matches disk");
+	});
+
+	test("status never invents a wire measurement that has not happened", () => {
+		expect(formatStatus(facts({ wire: null }))).toContain("measured on the wire: nothing yet this session");
+		expect(formatStatus(facts({ wire: { requests: 0, systemChars: null, toolsChars: null, payloadChars: null, at: null } })))
+			.toContain("nothing yet this session");
+	});
+
+	test("status distinguishes no snapshot from snapshots turned off", () => {
+		expect(formatStatus(facts({ snapshot: null }))).toContain("snapshots are off for this session");
+		expect(formatStatus(facts({ snapshot: { path: "/tmp/x", exists: false, ageMs: null, bytes: null } })))
+			.toContain("none written yet");
+	});
+
+	test("status names a skipped revive, because that is the state that silently loses a namespace", () => {
+		const s = formatStatus(facts({
+			snapshot: { path: "/tmp/state/ns.snapshot", exists: false, ageMs: null, bytes: null },
+			engine: { running: true, forkInherited: false, restoreSkipped: true, hasSnapshotHistory: true, names: 0 },
+		}));
+		expect(s).toContain("revive SKIPPED");
+		expect(s).toContain("this conversation has a saved past");
+	});
+
+	test("restart always flushes first; only fresh skips the revive", () => {
+		expect(planRestart({ action: "restart" })).toEqual({ flush: true, restore: true, fresh: false });
+		expect(planRestart({ action: "restart", fresh: true })).toEqual({ flush: true, restore: false, fresh: true });
+	});
+
+	test("the marker says EMPTY when the namespace is empty, and names the undo path", () => {
+		const plan = planRestart({ action: "restart", fresh: true });
+		const m = restartMarker(plan, { saved: 40, failed: 2 }, null, "/tmp/state/ns.pre-restart", "poisoned namespace");
+		expect(m).toContain("<repl_engine_reset>");
+		expect(m).toContain("EMPTY namespace");
+		expect(m).toContain("40 name(s) to the snapshot; 2 could not be serialized");
+		expect(m).toContain("/tmp/state/ns.pre-restart");
+		expect(m).toContain("Reason given: poisoned namespace");
+		expect(m).toContain("repl restart (without fresh)");
+		expect(m).toContain("</repl_engine_reset>");
+	});
+
+	test("the human's toast and the model's marker carry the same counts", () => {
+		const plan = planRestart({ action: "restart" });
+		const flushed = { saved: 12, failed: 0 };
+		const revived = { restored: 12, failed: 0 };
+		const toast = restartToast(plan, flushed, revived, "stale state");
+		const marker = restartMarker(plan, flushed, revived, null, "stale state");
+		expect(toast).toContain("12 flushed");
+		expect(marker).toContain("12 name(s)");
+		expect(toast).toContain("stale state");
+		expect(restartToast(plan, null, null)).toContain("nothing flushed");
+	});
+
+	test("a restart refused mid-cell says what to do instead", () => {
+		const n = restartBlockedNotice();
+		expect(n).toContain("a cell is running right now");
+		expect(n).toContain("Wait for the cell (or interrupt it)");
+	});
+
+	test("reload prefers the kernel's own verb and falls back to the sources the host just read", () => {
+		const cell = reloadCell([{ name: "capture", source: "x = 1" }]);
+		expect(cell).toContain("globals().get('helpers_reload')");
+		expect(cell).toContain("host sources");
+		expect(cell).toContain("x = 1");
+		expect(formatReload("helpers_reload()", { restored: ["capture", "git"], failed: ["trimwatch: SyntaxError: x"] }, null, { added: [], removed: [], changed: [], same: 2 }, 400))
+			.toContain("FAILED: trimwatch: SyntaxError: x");
+		expect(formatReload("host sources", { restored: ["capture"], failed: [] }, null, { added: ["capture"], removed: [], changed: [], same: 0 }, 400))
+			.toContain("advertised text CHANGED");
+		expect(formatReload("host sources", null, "ValueError: boom", { added: [], removed: [], changed: [], same: 0 }, 0))
+			.toContain("the reload cell raised ValueError: boom");
+	});
+});
+
+describe("EngineLifecycle.restart: the engine half of the repl restart verb", () => {
+	class Fake implements RevivableEngine {
+		flushes = 0;
+		discards = 0;
+		boots: (boolean | undefined)[] = [];
+		constructor(
+			private readonly skip: boolean | undefined,
+			private readonly log: string[],
+		) {}
+		async start(): Promise<void> {
+			this.boots.push(this.skip);
+			this.log.push(this.skip ? "boot:skip-restore" : "boot:restore");
+		}
+		restoreResult(): Promise<RestoreResult | null> {
+			return Promise.resolve(null);
+		}
+		restoreWasSkipped(): boolean {
+			return this.skip === true;
+		}
+		hasSnapshotHistory(): boolean {
+			return false;
+		}
+		snapshotState() {
+			this.flushes++;
+			return Promise.resolve({ path: "/tmp/ns.snapshot", saved: ["kept"], failed: [] });
+		}
+	}
+
+	const build = () => {
+		const log: string[] = [];
+		const created: Fake[] = [];
+		const lc = new EngineLifecycle<Fake>({
+			create: (skip?: boolean) => {
+				const e = new Fake(skip, log);
+				created.push(e);
+				return e;
+			},
+			discard: async (e) => {
+				e.discards++;
+				log.push("discard");
+			},
+		} as EngineLifecycleDeps<Fake>);
+		return { lc, log, created };
+	};
+
+	test("a restart flushes the live namespace before it tears the kernel down", async () => {
+		const { lc, log, created } = build();
+		await lc.acquire("cell", "conv");
+		const first = created[0];
+		const r = await lc.restart({ flush: true, restore: true }, "conv");
+		expect(r.flushed?.saved).toEqual(["kept"]);
+		expect(first.flushes).toBe(1);
+		// the first entry is the acquire() boot; the restart's own sequence is discard → boot, and the
+		// flush landed before the discard (asserted by `first.flushes === 1` on the live engine)
+		expect(log).toEqual(["boot:restore", "discard", "boot:restore"]);
+		expect(first.discards).toBe(1);
+	});
+
+	test("fresh restart boots an empty kernel, and the skip belongs to that kernel from then on", async () => {
+		const { lc, log, created } = build();
+		await lc.acquire("cell", "conv");
+		await lc.restart({ flush: true, restore: false }, "conv");
+		expect(log).toEqual(["boot:restore", "discard", "boot:skip-restore"]);
+		expect(created[1].restoreWasSkipped()).toBe(true);
+	});
+
+	test("restart works when no engine is running, and reports nothing flushed", async () => {
+		const { lc, created } = build();
+		const r = await lc.restart({ flush: true, restore: true }, "conv");
+		expect(r.flushed).toBeNull();
+		expect(created.length).toBe(1);
+		await lc.acquire("cell", "conv");
+		expect(created[0].flushes).toBe(0);
+	});
+
+	test("current looks without booting, which is what makes repl status read-only", async () => {
+		const { lc, created } = build();
+		expect(lc.current).toBeUndefined();
+		expect(created.length).toBe(0);
+		await lc.acquire("cell", "conv");
+		expect(lc.current).toBe(created[0]);
 	});
 });

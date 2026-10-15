@@ -1,11 +1,17 @@
 // --- pi-repl: one execute tool over Python; everything else runs as functions inside it ---
 
+import { copyFileSync, existsSync, linkSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
-import { buildHelpersPromptSection } from "./src/extension/helpers.js";
+import {
+	type HelperEntry,
+	formatHelperLine,
+	formatHelpersBlock,
+	helperEntriesForCwd,
+} from "./src/extension/helpers.js";
 import { buildPromptGuidelines, executePromptSnippet, executeToolDescription } from "./src/extension/prompt.js";
 import {
 	type ReplToggle,
@@ -18,6 +24,19 @@ import {
 	parseReplToggle,
 } from "./src/extension/repl-command.js";
 import { loadReplConfig, startEngaged } from "./src/extension/repl-config.js";
+import {
+	diffHelpers,
+	formatReload,
+	formatStatus,
+	planRestart,
+	reloadCell,
+	restartBlockedNotice,
+	restartMarker,
+	restartToast,
+	validateReplParams,
+	type Drift,
+	type ReplAction,
+} from "./src/extension/repl-tool.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
 import {
 	EngineLifecycle,
@@ -34,6 +53,58 @@ const executeSchema = Type.Object({
 		description: "Python source for this cell; stdout, stderr, and the last-expression result are returned.",
 	}),
 });
+
+/**
+ * One tool, three verbs — not three tools. Each entry costs an always-loaded line in the tool list.
+ * The pricing was measured, not assumed (autumn, 2026-10-15): adding a tool costs one prompt-cache
+ * miss, and a deep miss re-prefills ~6k tokens in ~2.1 s at `--prompt-cache 32`, not the 168k tokens
+ * in 49.2 s it cost at the old cap of 6. So the honest brake is "does this verb belong", never
+ * "can I afford the bytes".
+ */
+const replToolSchema = Type.Object({
+	action: Type.String({
+		description: '"status" (read-only report), "reload" (re-exec helper sources), or "restart" (new kernel)',
+	}),
+	fresh: Type.Optional(
+		Type.Boolean({
+			description:
+				"restart only: boot with an EMPTY namespace instead of reviving the snapshot just flushed. The flushed snapshot is kept as <snapshot>.pre-restart, so this is reversible.",
+		}),
+	),
+	reason: Type.Optional(
+		Type.String({
+			description: "restart/reload: one line saying why. Echoed into the human's toast and the model's reset marker.",
+		}),
+	),
+});
+
+const replToolDescription =
+	"Operate the Python evaluator itself, from outside it. `status`: read-only facts the kernel cannot see — " +
+	"engine alive, snapshot age, helper files on disk vs what the system prompt advertises, bytes measured on " +
+	"the outbound request. `reload`: re-exec the helper sources in the live kernel and report drift against the " +
+	"advertised text. `restart`: flush the namespace to a snapshot and boot a new kernel; `fresh: true` boots it " +
+	"EMPTY, and the flushed snapshot is kept as the undo.";
+
+const replToolPromptSnippet = "Operate the Python evaluator itself: status, reload helpers, restart the kernel";
+
+const replToolGuidelines = [
+	"When the namespace looks wrong — a stale variable, a helper that no longer behaves — `repl status` first. `repl restart` with fresh:true is the only way to get a clean evaluator, and it destroys every live handle in the old one.",
+];
+
+/**
+ * Structured result for the repl tool. No renderer yet, deliberately: the text report is the product,
+ * and a card for a status dump would be a second thing to keep honest. This exists because pi's
+ * AgentToolResult requires `details`, and because a future renderer can read facts rather than
+ * re-parse prose.
+ */
+type ReplToolDetails = {
+	action: ReplAction;
+	drift?: Drift;
+	flushed?: number | null;
+	revived?: number | null;
+	fresh?: boolean;
+	bakPath?: string | null;
+};
 
 function syncRenderState(
 	state: Partial<ExecuteRenderState>,
@@ -85,6 +156,20 @@ export default function (pi: ExtensionAPI) {
 	let stockTools: string[] | undefined;
 	// Pi rebuilds thrown errors as bare text; stash details to re-attach in tool_result.
 	const pendingErrorResults = new Map<string, { details: ExecuteDetails }>();
+	/** What the system prompt currently advertises about helpers, so drift is answerable at all. */
+	let advertised: { entries: HelperEntry[]; block: string | undefined; at: number } | undefined;
+	/** Bytes measured on the outbound payload — the only honest way to price an always-loaded surface. */
+	let wire = {
+		requests: 0,
+		systemChars: null as number | null,
+		toolsChars: null as number | null,
+		payloadChars: null as number | null,
+		at: null as number | null,
+	};
+	/** Cells in flight. A restart while one runs would snapshot a namespace mid-write. */
+	let cellsInFlight = 0;
+	/** This session's snapshot path, recorded at create() so status can stat it. */
+	let lastSnapshotPath: string | undefined;
 
 	const lifecycle = new EngineLifecycle<EngineManager>({
 		// --- bound the boot: a wedged first boot would hang every cell (acquire() dedupes onto it) ---
@@ -100,6 +185,8 @@ export default function (pi: ExtensionAPI) {
 				const { dir, snapshotPath } = resolveStateDir(stateRoot, sessionFile);
 				currentDir = basename(dir);
 				snapshot = { path: snapshotPath };
+				// recorded for `repl status`: the snapshot's age and size are host-side facts the kernel cannot see
+				lastSnapshotPath = snapshotPath;
 				// --- a /fork'd conversation inherits the parent's last namespace (copied once into the fork's own key) ---
 				try {
 					forkInherited = inheritForkSnapshot(stateRoot, sessionFile, snapshotPath);
@@ -230,9 +317,40 @@ export default function (pi: ExtensionAPI) {
 		if (!active()) return;
 		const skillsPrompt = withSkillsBlock(event.systemPrompt, event.systemPromptOptions?.skills ?? []);
 		let systemPrompt = skillsPrompt ?? event.systemPrompt;
-		const helpersBlock = buildHelpersPromptSection(ctx?.cwd ?? process.cwd());
+		const cwd = ctx?.cwd ?? process.cwd();
+		// stash what we are about to advertise, so `repl status` can answer the one question that matters
+		// about a helper edit: is the model looking at text that matches the file on disk right now?
+		const entries = helperEntriesForCwd(cwd, process.env.PI_HELPERS_GLOBAL_DIR, process.env.PI_HELPERS_DIR);
+		const helpersBlock = formatHelpersBlock(entries);
+		advertised = { entries, block: helpersBlock, at: Date.now() };
 		if (helpersBlock) systemPrompt = `${systemPrompt}\n\n${helpersBlock}`;
 		return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
+	});
+
+	// --- the byte meter. My own rule says price an always-loaded surface by measuring it on the wire,
+	// never by summing description chars, and this is the only place that can: the payload here is what
+	// actually goes out. Two JSON.stringify per request against a multi-second inference call is noise. ---
+	pi.on("before_provider_request", (event) => {
+		const body = event.payload as
+			| { messages?: Array<{ role?: unknown; content?: unknown }>; tools?: unknown }
+			| undefined;
+		let systemChars: number | null = null;
+		if (Array.isArray(body?.messages)) {
+			let n = 0;
+			for (const message of body.messages) {
+				if (message?.role === "system" && typeof message.content === "string") n += message.content.length;
+			}
+			if (n > 0) systemChars = n;
+		}
+		let toolsChars: number | null = null;
+		let payloadChars: number | null = null;
+		try {
+			if (body?.tools !== undefined) toolsChars = JSON.stringify(body.tools).length;
+			payloadChars = JSON.stringify(event.payload).length;
+		} catch {
+			// an unserializable payload: keep the readings we have rather than losing all of them
+		}
+		wire = { requests: wire.requests + 1, systemChars, toolsChars, payloadChars, at: Date.now() };
 	});
 
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
@@ -274,6 +392,8 @@ export default function (pi: ExtensionAPI) {
 			onUpdate?.({ content: [], details: {} });
 			const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
 			const { engine: m } = await lifecycle.acquire("cell", sessionKey);
+			// a restart while a cell runs would snapshot a namespace mid-write; this counter is the guard
+			cellsInFlight++;
 			try {
 				// --- accumulate partial updates so the row height doesn't oscillate ---
 				let streamed = "";
@@ -325,7 +445,159 @@ export default function (pi: ExtensionAPI) {
 					await lifecycle.discard();
 				}
 				throw error;
+			} finally {
+				cellsInFlight = Math.max(0, cellsInFlight - 1);
 			}
+		},
+	});
+
+	// --- the meta-verbs: the things the kernel cannot do to itself. A cell can re-exec its own helper
+	// sources, but it cannot obtain a fresh evaluator, cannot see what the host advertised about it, and
+	// cannot see what went over the wire. Policy is pure and lives in repl-tool.ts; this is the binding. ---
+	pi.registerTool<typeof replToolSchema, ReplToolDetails>({
+		name: "repl",
+		label: "repl",
+		description: replToolDescription,
+		promptSnippet: replToolPromptSnippet,
+		promptGuidelines: replToolGuidelines,
+		parameters: replToolSchema,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const decision = validateReplParams(params);
+			if (!decision.ok) throw new Error(decision.error);
+			const p = decision.params;
+			if (!active() && p.action !== "status")
+				throw new Error("pi-repl is dormant in this session. Start pi with --repl, or run /repl on.");
+			const sessionKey = location.sessionFile ? conversationName(location.sessionFile) : undefined;
+			const diskHelpers = () =>
+				helperEntriesForCwd(location.cwd, process.env.PI_HELPERS_GLOBAL_DIR, process.env.PI_HELPERS_DIR);
+
+			if (p.action === "status") {
+				// --- read-only: never boot a kernel just to report on it ---
+				const m = lifecycle.current;
+				const running = m?.isRunning ?? false;
+				let names: number | null = null;
+				if (running && m) {
+					const listed = await m.listNamespaceNames();
+					names = listed ? listed.length : null;
+				}
+				let snapshot: { path: string; exists: boolean; ageMs: number | null; bytes: number | null } | null = null;
+				if (lastSnapshotPath) {
+					try {
+						const st = statSync(lastSnapshotPath);
+						snapshot = { path: lastSnapshotPath, exists: true, ageMs: Date.now() - st.mtimeMs, bytes: st.size };
+					} catch {
+						snapshot = { path: lastSnapshotPath, exists: false, ageMs: null, bytes: null };
+					}
+				}
+				const disk = diskHelpers();
+				const adv = advertised?.entries ?? [];
+				const drift = diffHelpers(adv, disk);
+				const text = formatStatus({
+					replMode: active(),
+					engine: {
+						running,
+						forkInherited: m?.inheritedFromFork ?? false,
+						restoreSkipped: m?.restoreWasSkipped() ?? false,
+						hasSnapshotHistory: m?.hasSnapshotHistory() ?? false,
+						names,
+					},
+					snapshot,
+					helpers: {
+						files: disk,
+						advertised: adv.map((entry) => ({ name: entry.name, chars: formatHelperLine(entry).length })),
+						blockChars: advertised?.block?.length ?? 0,
+						advertisedAt: advertised?.at ?? null,
+					},
+					wire,
+					drift,
+					activeTools: pi.getActiveTools(),
+				});
+				return { content: [{ type: "text" as const, text }], details: { action: "status", drift } };
+			}
+
+			if (p.action === "reload") {
+				const { engine: m } = await lifecycle.acquire("cell", sessionKey);
+				const disk = diskHelpers();
+				const sources = disk.map((entry) => {
+					try {
+						return { name: entry.name, source: readFileSync(entry.path, "utf8") };
+					} catch {
+						return { name: entry.name, source: "" };
+					}
+				});
+				const r = await m.execute(reloadCell(sources));
+				let via = "unknown";
+				let result: { restored?: string[]; failed?: string[] } | null = null;
+				let error: string | null = r.error ? `${r.error.name}: ${r.error.message}` : null;
+				const lines = (r.stdout ?? "").split("\n").filter((line) => line.trim() !== "");
+				const last = lines.pop();
+				if (last) {
+					try {
+						const parsed = JSON.parse(last) as {
+							via?: string;
+							result?: { restored?: string[]; failed?: string[] };
+							error?: string;
+						};
+						via = parsed.via ?? via;
+						result = parsed.result ?? null;
+						error = error ?? parsed.error ?? null;
+					} catch {
+						error = error ?? `unparsable reload report: ${last}`;
+					}
+				}
+				const prev = advertised?.entries ?? [];
+				advertised = { entries: disk, block: formatHelpersBlock(disk), at: Date.now() };
+				const drift = diffHelpers(prev, disk);
+				const report = formatReload(via, result, error, drift, advertised.block?.length ?? 0);
+				// the kernel's own lines are the useful half: a helper's reload verb prints what it rebuilt
+				const kernelSaid =
+					lines.length > 0 ? `\n  kernel said:\n${lines.map((line) => `    ${line}`).join("\n")}` : "";
+				return {
+					content: [{ type: "text" as const, text: report + kernelSaid }],
+					details: { action: "reload", drift },
+				};
+			}
+
+			// --- restart: flush, tear down, boot. The guard is the safety property, not a nicety. ---
+			if (cellsInFlight > 0) throw new Error(restartBlockedNotice());
+			const plan = planRestart(p);
+			let bakPath: string | null = null;
+			if (plan.fresh && lastSnapshotPath && existsSync(lastSnapshotPath)) {
+				const candidate = `${lastSnapshotPath}.pre-restart`;
+				try {
+					rmSync(candidate, { force: true });
+					linkSync(lastSnapshotPath, candidate); // a hardlink: O(1), and a snapshot can be 100 MB
+					bakPath = candidate;
+				} catch {
+					try {
+						copyFileSync(lastSnapshotPath, candidate);
+						bakPath = candidate;
+					} catch {
+						bakPath = null;
+					}
+				}
+			}
+			const { flushed } = await lifecycle.restart(plan, sessionKey);
+			const booted = lifecycle.current;
+			const revived = booted ? await booted.restoreResult() : null;
+			// the marker below IS the notice; leaving the lifecycle's copy pending would announce the same
+			// restart twice, and a second <repl_engine_reset> reads like a second rebuild
+			lifecycle.takeResetNotice();
+			const flushReport = flushed ? { saved: flushed.saved.length, failed: flushed.failed.length } : null;
+			const reviveReport = revived ? { restored: revived.restored.length, failed: revived.failed.length } : null;
+			ctx?.ui?.notify?.(restartToast(plan, flushReport, reviveReport, p.reason), "info");
+			return {
+				content: [
+					{ type: "text" as const, text: restartMarker(plan, flushReport, reviveReport, bakPath, p.reason) },
+				],
+				details: {
+					action: "restart",
+					fresh: plan.fresh,
+					flushed: flushReport?.saved ?? null,
+					revived: reviveReport?.restored ?? null,
+					bakPath,
+				},
+			};
 		},
 	});
 }

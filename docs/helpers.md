@@ -205,7 +205,12 @@ The file is executed before the first cell. A top-level print pollutes every new
 
 ### A changed helper is not visible
 
-The prompt guidance and kernel namespace are established during startup. Run `/reload` after editing the file.
+The kernel execs helper sources at boot, and the `helper_description` block is rebuilt into the system
+prompt at the start of each agent run. So after editing a file, the description reaches the model on the
+next run, but the *code* is not live until something re-exec's it. Ask for that with the `repl` tool:
+`repl reload` re-exec's the sources on disk in the live kernel and reports the drift between them and the
+advertised text; `repl status` reports the drift without changing anything; `repl restart` (with
+`fresh: true`) gets a kernel that never loaded the old version at all. There is no `/reload` command.
 
 ### A helper hides the decision
 

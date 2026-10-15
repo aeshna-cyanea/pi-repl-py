@@ -1,7 +1,35 @@
 ## [Unreleased]
 
+### Added
+
+- The `repl` tool: three verbs over the evaluator itself, one tool entry. `status` is read-only and
+  answers questions the kernel cannot answer about its own host — is the engine alive, when was the
+  namespace last snapshotted and how big is it, which helpers are on disk versus which the system prompt
+  is currently advertising (and the diff between the two), and what the outbound request actually measured
+  in bytes. `reload` re-exec's the helper sources currently on disk in the live kernel — preferring a
+  loaded `helpers_reload()` when the helper set owns one — and reports drift against the advertised text.
+  `restart` tears the kernel down and boots a new one: it always flushes the namespace to the snapshot
+  first, and `fresh: true` boots EMPTY instead of reviving that snapshot, keeping the flushed file as a
+  hardlink undo. It refuses while a cell is in flight, because tearing down mid-cell snapshots a namespace
+  in the middle of a write. Why these three: they are the things a cell cannot do to itself.
+- `EngineLifecycle.restart`, `RevivableEngine.snapshotState`, and a `before_provider_request` byte meter
+  feeding `status`. Helper entries now carry their path, byte size and mtime, and the advertised block has
+  one home (`formatHelpersBlock`) instead of being re-derived in two places.
+
 ### Changed
 
+- The display card (Key 138) rides the kernel's own display channel — one JSON object published under
+  `application/vnd.pi-repl.card+json` during a cell — instead of a file in `$TMPDIR`. The file needed a
+  path, the path reached the kernel as a global injected at boot (`PAN_CARD_PATH`), and namespace state is
+  snapshotted: a kernel revived after a resume, a `/fork`, or a wedged-kernel rebuild kept writing cards to
+  the dead bridge's path, and every card in that session vanished silently forever. The new channel has no
+  path to go stale, needs no boot-time state, costs nothing when nothing is published (the file cost one
+  stat per cell), and is already this bridge's out-of-band slot — snapshot, restore and names ride it — so
+  per-cell pairing comes from the iopub `msg_id` filter rather than from read-and-clear ordering. Two side
+  effects: `/fork`'s toast now counts the names it actually inherited (the injected global was one of them),
+  and no card file is ever left in `$TMPDIR`.
+- README and docs/helpers.md no longer tell the reader to run `/reload`: no such command exists. The only
+  command this extension registers is `/repl`; the helper verbs are the `repl` tool.
 - The evaluator venv is built with `--system-site-packages` (fork-local; upstream builds an isolated
   venv). A personal REPL on a desktop box gains nothing from isolation, and it costs a second package
   surface: every library a helper wants has to be installed into this venv as well as into the box.

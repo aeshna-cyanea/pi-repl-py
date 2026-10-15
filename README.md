@@ -109,6 +109,11 @@ On **Termux (Android)**, the `postinstall` venv build can fail because `ipykerne
   for files. There is no extra wrapper API to learn.
 - **Error survival.** A cell that throws reports the traceback and the kernel keeps going.
 - **Explicit recovery.** If it restarts, pi-repl reports which state it restored and which state it lost.
+- **A `repl` tool, for the evaluator itself.** Three verbs, one tool entry: `status` (read-only — is the
+  kernel alive, when was the namespace last snapshotted, what helpers are on disk versus what the prompt
+  advertises, and what the outbound request actually measured), `reload` (re-exec the helper sources in the
+  live kernel and report the drift), and `restart` (a new kernel; `fresh: true` boots an empty namespace and
+  keeps the flushed snapshot as the undo). These are the three things a cell cannot do to itself.
 
 ## Helpers
 
@@ -134,9 +139,13 @@ The extension keeps its runtime under one folder in your home directory:
 Project helpers live in `<project>/.pi/helpers/` instead; both tiers are scanned with the
 project one first. No config file.
 
-Changing a helper (adding/removing a file, renaming one with a `_` prefix) needs a
-**session restart / `/reload`**: the prompt list is built when `execute` is registered and
-the kernel execs helpers only at boot.
+A helper is exec'd into the kernel at boot, and the `helper_description` block is rebuilt into the
+system prompt at the start of each agent run. So an *edited* file is not live until something re-execs
+it, and a *renamed* file (`web.py` → `_web.py`) is not un-loaded until the kernel is rebuilt. Ask for
+either with the `repl` tool: `repl reload` re-exec's the sources currently on disk in the live kernel and
+reports drift against the advertised text; `repl restart` gets a genuinely new kernel. `repl status`
+names the drift without changing anything. (There is no `/reload` command — the only command this
+extension registers is `/repl`.)
 
 ## Configuration
 
