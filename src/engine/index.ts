@@ -21,6 +21,14 @@ function resolvePythonPath(_cwd: string | undefined): string {
 export const DEFAULT_MAX_OUTPUT_CHARS = 46080;
 /** Per-line cap: one giant line must not own the channel budget while long JSON/reprs/errors still pass whole. */
 export const MAX_OUTPUT_LINE_CHARS = 4096;
+/** A cell's `result` is the echo of a value nobody asked to see: if I wanted it, I would have bound it.
+ *  stdout keeps the channel budget because a command's output usually IS the point; a result does not.
+ *  And unlike cap(), a result needs no full-copy-to-disk: the persistent kernel is the archive, so
+ *  assigning the value keeps it. Measured 2026-10-15: an unbounded result echo spent 11,399 chars on a
+ *  cell whose last expression was a 300-line string, and IPython's trailing semicolon does NOT suppress
+ *  it on this bridge — `'x';` and `'x'` echo identically, so `;` is not a mitigation here. */
+export const DEFAULT_MAX_RESULT_LINES = 40;
+export const DEFAULT_MAX_RESULT_CHARS = 4000;
 const ABORT_GRACE_MS = 20_000;
 /** Shared deadline: bounds a wedged boot (lifecycle) and a wedged background restore alike. */
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
@@ -108,6 +116,26 @@ export function capLinesForContext(text: string): { text: string; trimmed: boole
 		return line.slice(0, MAX_OUTPUT_LINE_CHARS);
 	});
 	return { text: mapped.join("\n"), trimmed };
+}
+
+export interface BoundResult { text: string; trimmed: boolean; lines: number; shownLines: number; chars: number }
+
+/** Bound a cell result to its own budget. The totals in the marker are the TRUE totals of the input,
+ *  so a bounded echo can never understate what it withheld. */
+export function boundResult(text: string, maxLines: number = DEFAULT_MAX_RESULT_LINES, maxChars: number = DEFAULT_MAX_RESULT_CHARS): BoundResult {
+	const lines = text.split("\n");
+	const chars = text.length;
+	if (lines.length <= maxLines && chars <= maxChars) {
+		return { text, trimmed: false, lines: lines.length, shownLines: lines.length, chars };
+	}
+	let kept = lines.slice(0, maxLines).join("\n");
+	const shownLines = Math.min(lines.length, maxLines);
+	const byChars = kept.length > maxChars;
+	if (byChars) kept = kept.slice(0, maxChars);
+	const marker = `[... result bounded: showed ${shownLines} of ${lines.length} lines, ${chars} chars total` +
+		(byChars ? `, cut at ${maxChars} chars` : "") +
+		". the kernel keeps no unbound value: assign it (x = ...) to get it whole ...]";
+	return { text: `${kept}\n${marker}`, trimmed: true, lines: lines.length, shownLines, chars };
 }
 
 const DEFAULT_KEEP_SNAPSHOTS = 25;
@@ -372,10 +400,11 @@ export class EngineManager {
 				return {
 					stdout: finalize(r.stdout, r.truncated?.stdout ?? false),
 					stderr: finalize(r.stderr, r.truncated?.stderr ?? false),
-					result: r.result !== undefined ? finalize(String(r.result), String(r.result).length > maxChars) : undefined,
+					// the result rides its own budget, not the channel budget: see DEFAULT_MAX_RESULT_LINES
+					result: r.result !== undefined ? boundResult(String(r.result)).text : undefined,
 					error: r.error,
-					// NOT finalized: stdout/stderr/result get truncated against a byte cap because they can
-					// be 45 KB of stream. A card is written by a helper that chose to write it, and truncating
+					// NOT finalized: stdout/stderr ride the channel cap and result rides the tighter one above,
+					// because all three can be 45 KB of stream. A card is written by a helper that chose to write it, and truncating
 					// a diff mid-hunk renders a change that does not exist — so the render edge bounds what is
 					// shown, and this layer does not silently rewrite the artifact.
 					card: r.card,

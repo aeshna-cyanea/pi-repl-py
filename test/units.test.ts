@@ -13,8 +13,11 @@ import { dirname, join } from "node:path";
 import { resolveHelperDirs } from "../src/engine/helpers-locate.js";
 import type { RestoreResult } from "../src/engine/index.js";
 import {
+	boundResult,
 	capLinesForContext,
 	DEFAULT_MAX_OUTPUT_CHARS,
+	DEFAULT_MAX_RESULT_CHARS,
+	DEFAULT_MAX_RESULT_LINES,
 	EngineManager,
 	MAX_OUTPUT_LINE_CHARS,
 	pruneOrphanedSnapshotDirs,
@@ -716,6 +719,54 @@ describe("per-line output cap", () => {
 		expect(a).toBe("ok");
 		expect(b.length).toBe(MAX_OUTPUT_LINE_CHARS);
 		expect(c).toBe("fine");
+	});
+});
+
+describe("cell result bound", () => {
+	const many = (n: number) => Array.from({ length: n }, (_, i) => `line ${i} of a deliberately long value`).join("\n");
+
+	test("a result inside both budgets passes through untouched", () => {
+		const r = boundResult("one\ntwo\nthree");
+		expect(r.trimmed).toBe(false);
+		expect(r.text).toBe("one\ntwo\nthree");
+		expect(r.lines).toBe(3);
+	});
+
+	test("a result at exactly the line budget is NOT trimmed", () => {
+		const text = Array.from({ length: DEFAULT_MAX_RESULT_LINES }, (_, i) => `line ${i}`).join("\n");
+		const r = boundResult(text);
+		expect(r.trimmed).toBe(false);
+		expect(r.text).toBe(text);
+	});
+
+	test("a long multi-line result is cut to the line budget, marker included", () => {
+		const text = many(300);
+		const r = boundResult(text);
+		expect(r.trimmed).toBe(true);
+		expect(r.text.split("\n").length).toBe(DEFAULT_MAX_RESULT_LINES + 1);
+		expect(r.lines).toBe(300);
+		expect(r.shownLines).toBe(DEFAULT_MAX_RESULT_LINES);
+	});
+
+	test("the marker names the TRUE totals, so a bounded echo cannot understate what it cut", () => {
+		const text = many(300);
+		const r = boundResult(text);
+		expect(r.text).toContain(`showed ${DEFAULT_MAX_RESULT_LINES} of 300 lines`);
+		expect(r.text).toContain(`${text.length} chars total`);
+	});
+
+	test("one giant line is cut by the char budget, and the marker says so", () => {
+		const text = "x".repeat(200_000);
+		const r = boundResult(text);
+		expect(r.trimmed).toBe(true);
+		expect(r.lines).toBe(1);
+		expect(r.text.length).toBeLessThanOrEqual(DEFAULT_MAX_RESULT_CHARS + 250);
+		expect(r.text).toContain(`cut at ${DEFAULT_MAX_RESULT_CHARS} chars`);
+	});
+
+	test("the marker names the repair: the kernel keeps nothing unbound", () => {
+		const r = boundResult("a\n".repeat(500));
+		expect(r.text).toContain("assign it");
 	});
 });
 

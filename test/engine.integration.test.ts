@@ -156,6 +156,36 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 	});
 
 	test(
+		"a big unbound result is bounded on its own budget, and the marker names the true total",
+		{ timeout: 60_000 },
+		async () => {
+			const d = tempDir();
+			const m = engine({ cwd: d });
+			// the exact probe measured 2026-10-15: this cell echoed 11,399 chars, and a trailing `;` did not help
+			// A str result arrives as its repr, so a 300-line string is ONE line of \n escapes and the
+			// line budget cannot fire on it — the char budget does. chr(10) rather than a backslash
+			// escape because this test already failed once on its own escaping.
+			const big = await m.execute("chr(10).join('line %03d of a deliberately long value' % i for i in range(300))");
+			expect(big.status).toBe("ok");
+			expect(big.result).toBeDefined();
+			expect(big.result!.length).toBeLessThan(6_000);
+			expect(big.result).toContain("result bounded");
+			expect(big.result).toMatch(/chars total, cut at \d+ chars/);
+			expect(big.result).toContain("assign it");
+			// the line budget needs a result that is genuinely multi-line, which repr() of a str never is
+			const many = await m.execute(
+				["class Many:", "    def __repr__(self): return chr(10).join('line %03d' % i for i in range(300))", "Many()"].join("\n"),
+			);
+			expect(many.status).toBe("ok");
+			expect(many.result).toMatch(/showed \d+ of 300 lines/);
+			expect(many.result!.split("\n").length).toBeLessThanOrEqual(41);
+			// the kernel is the archive: bind the value and it is whole in the next cell
+			const bound = await m.execute("v = chr(10).join('line %03d' % i for i in range(300))\nv.count(chr(10))");
+			expect(bound.result).toContain("299");
+		},
+	);
+
+	test(
 		"no pi-repl discovery intrinsics are injected; the workspace is standard Python",
 		{ timeout: 60_000 },
 		async () => {

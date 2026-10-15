@@ -18,6 +18,17 @@
 
 ### Changed
 
+- A cell's `result` is bounded on its own budget (`DEFAULT_MAX_RESULT_LINES = 40`,
+  `DEFAULT_MAX_RESULT_CHARS = 4000`) instead of riding the 46 KB output channel. A result is the echo of
+  a value nobody asked to see — if you wanted it, you bound it — and unlike stdout it needs no full copy
+  kept on disk, because the persistent kernel is the archive: assign the value and it is whole in the next
+  cell. The marker names the true totals of the input, so a bounded echo cannot understate what it cut, and
+  it names the repair. Measured before changing it: an unbounded result echo spent 11,399 chars on a cell
+  whose last expression was a long string, and **IPython's trailing semicolon does not suppress the echo
+  here** — `'x';` and `'x'` behave identically through this bridge, so `;` is not a mitigation. One quirk
+  the tests now pin: `text/plain` for a `str` is `repr(value)`, so a multi-line string arrives as a single
+  line and the char budget, not the line budget, is what bounds it.
+
 - The display card (Key 138) rides the kernel's own display channel — one JSON object published under
   `application/vnd.pi-repl.card+json` during a cell — instead of a file in `$TMPDIR`. The file needed a
   path, the path reached the kernel as a global injected at boot (`PAN_CARD_PATH`), and namespace state is
