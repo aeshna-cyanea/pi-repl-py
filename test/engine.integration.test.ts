@@ -108,6 +108,22 @@ describe("host × python-kernel integration", () => {
 		expect(r3.stdout).toContain("20");
 	});
 
+	/**
+	 * The kernel is TOLD which conversation it is in, and the telling is one env hop: create() sets
+	 * PAN_SESSION_STEM from conversationName(sessionFile), the bridge spawns ipykernel with the host's env,
+	 * and the guest reads it. Pinned here because nothing else in this suite proves that hop exists, and
+	 * the keep tier depends on it: it is what lets a capture be filed under its own session without the
+	 * kernel guessing at "newest .jsonl by mtime" -- the guess that named the wrong session, with two Pi
+	 * instances live, on 2026-10-13.
+	 */
+	test("the host's session key reaches the guest's os.environ", { timeout: 60_000 }, async () => {
+		const d = tempDir();
+		const m = engine({ cwd: d, env: { PAN_SESSION_STEM: "2026-01-01T00-00-00-000Z_deadbeef" } });
+		const r = await m.execute("import os; print('STEM=[' + str(os.environ.get('PAN_SESSION_STEM')) + ']')");
+		expect(r.status).toBe("ok");
+		expect(r.stdout).toContain("STEM=[2026-01-01T00-00-00-000Z_deadbeef]");
+	});
+
 	test(
 		"a deleted session cwd does not prevent the kernel from booting (cwd fallback)",
 		{ timeout: 60_000 },

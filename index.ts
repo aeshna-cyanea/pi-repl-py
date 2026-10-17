@@ -210,6 +210,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			return new EngineManager({
 				cwd,
+				// --- the kernel is TOLD which conversation it is in, never left to guess it. acquire() already
+				// tears the engine down when a different sessionKey arrives (session-engine.ts), so an env var set
+				// here cannot outlive its session: a new conversation means a new spawn. Verified end to end
+				// 2026-10-16 -- an env var on the bridge spawn reaches os.environ inside an ipykernel cell -- so no
+				// injection cell and no re-run-on-session-change hook is needed. Left ABSENT when there is no session
+				// file (an ephemeral session): absence is the honest signal, and the kernel refuses to pin rather
+				// than fall back to a newest-jsonl-by-mtime guess, which is the guess that named the wrong session
+				// on 2026-10-13. The stem is the same string the snapshot dir is keyed by (conversationName), so
+				// pan/logs/keep/<stem>/ and this conversation's state dir are visibly one session.
+				env: sessionFile ? { PAN_SESSION_STEM: conversationName(sessionFile) } : undefined,
 				// --- snapshots are per-conversation; skipRestore marks the wedged-boot retry ---
 				snapshot,
 				skipRestore,
