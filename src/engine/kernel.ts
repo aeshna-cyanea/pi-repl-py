@@ -10,6 +10,14 @@ import { resolveHelperDirs } from "./helpers-locate.js";
 const SILENCE_KILL_GRACE_MS = 2000;
 /** The bridge ships at the package root, next to index.ts; src/engine is two levels deep. */
 const BRIDGE_PATH = fileURLToPath(new URL("../../bridge.py", import.meta.url));
+/**
+ * The one line the kernel runs before the helper preload (Key 221 step 2).
+ *
+ * It is a *line*, not a mechanism: the package it imports declares the flat verb surface, and the host
+ * neither parses nor advertises it. Empty string turns it off, which is the revert lever — no code
+ * change, no rebuild, and the helpers alone still give a working session.
+ */
+export const DEFAULT_BOOTSTRAP = "from panlib.boot import *";
 
 export interface KernelOptions {
 	cwd?: string;
@@ -58,6 +66,14 @@ export interface HelperLoadResult {
 	name: string;
 	ok: boolean;
 	/** First error line, e.g. "NameError: name 'x' is not defined"; undefined when ok. */
+	error?: string;
+}
+
+/** What the bridge says about the injected bootstrap line: it ran, and whether it raised. */
+export interface BootstrapLoadResult {
+	ok: boolean;
+	/** The line as the host sent it, so a report shows which line a verdict is about. */
+	line: string;
 	error?: string;
 }
 
@@ -133,6 +149,7 @@ export class KernelClient {
 	private inputBuffer = "";
 	private readyWaiters: { resolve(msg: BridgeMessage): void; reject(error: Error): void }[] = [];
 	private helperBootReport: HelperLoadResult[] = [];
+	private bootstrapReport?: BootstrapLoadResult;
 	private nextId = 0;
 	private _onUnexpectedExit?: () => void;
 	private watchdog?: ReturnType<typeof setInterval>;
@@ -174,7 +191,12 @@ export class KernelClient {
 				? readHelperSources([opts.env.PI_HELPERS_DIR])
 				: readHelperSources(resolveHelperDirs(opts.cwd, opts.env?.PI_HELPERS_GLOBAL_DIR))
 		).map((h) => ({ name: h.name, source: h.source }));
-		kc.send({ op: "boot", helpers, snapshot: opts.snapshot });
+		// **Per-engine env first, then the process env** — the opposite precedence to the numeric knobs in
+		// index.ts, and deliberately: this one decides what code runs at boot, so the caller that set it
+		// (the embedding extension, the test suite) has to be able to settle it without an ambient variable
+		// re-arming it. A knob whose off switch can be overridden by the environment is not an off switch.
+		const bootstrap = opts.env?.PI_REPL_BOOTSTRAP ?? process.env.PI_REPL_BOOTSTRAP ?? DEFAULT_BOOTSTRAP;
+		kc.send({ op: "boot", helpers, bootstrap, snapshot: opts.snapshot });
 
 		try {
 			await kc.waitReady();
@@ -212,6 +234,18 @@ export class KernelClient {
 			case "ready": {
 				const helpers = Array.isArray(msg.helpers) ? (msg.helpers as HelperLoadResult[]) : [];
 				this.helperBootReport = helpers;
+				const b = msg.bootstrap as BootstrapLoadResult | null | undefined;
+				this.bootstrapReport = b && typeof b.ok === "boolean" ? b : undefined;
+				// A failed bootstrap joins the helper report rather than riding its own channel, because the
+				// extension already has a path for "some boot-time code did not load": the toast and the
+				// <repl_helpers_failed> line, which is exactly the shape I act on. During coexistence a
+				// bootstrap and a helper are the same kind of thing -- boot-time code landing in __main__.
+				if (this.bootstrapReport && !this.bootstrapReport.ok) {
+					this.helperBootReport = [
+						{ name: "bootstrap", ok: false, error: this.bootstrapReport.error ?? "failed to run" },
+						...this.helperBootReport,
+					];
+				}
 				this.readyWaiters.shift()?.resolve(msg);
 				break;
 			}
@@ -529,6 +563,11 @@ export class KernelClient {
 
 	get helperReport(): readonly HelperLoadResult[] {
 		return this.helperBootReport;
+	}
+
+	/** The bridge's own verdict on the injected line; undefined when no bootstrap was sent. */
+	get bootstrap(): BootstrapLoadResult | undefined {
+		return this.bootstrapReport;
 	}
 
 	get isRunning(): boolean {

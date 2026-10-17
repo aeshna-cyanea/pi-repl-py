@@ -23,7 +23,7 @@ import {
 	pruneOrphanedSnapshotDirs,
 	pruneSnapshotDirs,
 } from "../src/engine/index.js";
-import { type CellResult, KernelClient } from "../src/engine/kernel.js";
+import { type CellResult, DEFAULT_BOOTSTRAP, KernelClient } from "../src/engine/kernel.js";
 import { buildHelpersMap, buildHelpersMapForCwd, buildHelpersPromptSection } from "../src/extension/helpers.js";
 import { buildPromptGuidelines } from "../src/extension/prompt.js";
 import {
@@ -1555,6 +1555,7 @@ describe("bridge pipe routing", () => {
 		send(msg: unknown): void;
 		handleLine(line: string): void;
 		executeCellNow(code: string, opts: object): Promise<CellResult>;
+		readonly helperReport: { name: string; ok: boolean; error?: string }[];
 	};
 
 	function routedKernel() {
@@ -1655,6 +1656,37 @@ describe("bridge pipe routing", () => {
 		feed(`{"type":"reply","id":"${req.id}","error":"snapshot unreadable"}`);
 		await expect(rest).rejects.toThrow("snapshot unreadable");
 		expect(() => feed("this is not json")).not.toThrow();
+	});
+
+	// --- Key 221 step 2: the injected bootstrap line, and what the host does with its verdict.
+	test("the injected line is one line, and naming it here is what makes changing it a decision", () => {
+		// Nothing in the host parses this string. It is the whole mechanism, so the assertion is not
+		// describing behaviour -- it is the tripwire on the one thing the extension injects.
+		expect(DEFAULT_BOOTSTRAP).toBe("from panlib.boot import *");
+	});
+
+	test("a failed bootstrap joins the helper report, because that is the channel I already act on", () => {
+		const { kc, feed } = routedKernel();
+		feed(
+			'{"type":"ready","helpers":[{"name":"capture","ok":true}],"bootstrap":{"ok":false,"line":"from panlib.boot import *","error":"ModuleNotFoundError: No module named panlib"}}',
+		);
+		const report = kc.helperReport;
+		expect(report[0]).toEqual({
+			name: "bootstrap",
+			ok: false,
+			error: "ModuleNotFoundError: No module named panlib",
+		});
+		expect(report.map((h) => h.name)).toEqual(["bootstrap", "capture"]); // the helpers are not displaced
+	});
+
+	test("a bootstrap that succeeded adds no entry, and neither does a bridge that sent no line", () => {
+		const ok = routedKernel();
+		ok.feed('{"type":"ready","helpers":[{"name":"capture","ok":true}],"bootstrap":{"ok":true,"line":"x = 1"}}');
+		expect(ok.kc.helperReport.map((h) => h.name)).toEqual(["capture"]);
+
+		const none = routedKernel();
+		none.feed('{"type":"ready","helpers":[{"name":"capture","ok":true}],"bootstrap":null}');
+		expect(none.kc.helperReport.map((h) => h.name)).toEqual(["capture"]);
 	});
 });
 

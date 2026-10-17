@@ -60,8 +60,16 @@ def skip_set_literal(helper_names):
 def snapshot_code(helper_names, max_bytes):
     # v4: cloudpickle serializes functions and classes by value — no source-capture machinery.
     # Entries are zlib-compressed cloudpickle streams; one unpicklable binding costs itself only.
+    #
+    # `__repl_boot` is the list of names the injected bootstrap line bound (Key 221 step 2), written by
+    # op_boot under an underscore name so the `startswith('_')` rule below never snapshots the record
+    # itself. The package's verbs are not user state -- they come back from `panlib` on every boot -- and
+    # pickling them spends the same cap my real bindings share. Measured 2026-10-17: 122 names, ~45 bytes
+    # each, against a 128 MB cap and a 138 KB snapshot, and cloudpickle resolves them BY REFERENCE (a
+    # restored `patch` is `panlib.text.patchkit.patch`, identity intact), so this is cap honesty and a
+    # quieter `saved` list, not the fix for a live two-instances hazard.
     return ("import cloudpickle as _cp, base64 as _b64, json as _js, zlib as _zl\n"
-            + "__repl_skip = set(" + skip_set_literal(helper_names) + ")\n"
+            + "__repl_skip = set(" + skip_set_literal(helper_names) + ") | set(globals().get('__repl_boot', ()))\n"
             + "__repl_max = " + str(max_bytes) + "\n"
             + """__repl_e = []
 __repl_f = []
@@ -385,10 +393,37 @@ class Bridge:
                 return None
         return value if isinstance(value, dict) else None
 
+    # The two cells that fence the bootstrap. Both write under an underscore name, which is how the
+    # snapshot's own `startswith('_')` rule keeps them out of the namespace it persists.
+    BASELINE_CODE = "globals()['__repl_base'] = set(globals())"
+    BOOT_NAMES_CODE = "globals()['__repl_boot'] = sorted(set(globals()) - globals()['__repl_base'])"
+
     def op_boot(self, boot):
         self.helper_names = [h["name"] for h in boot.get("helpers") or []]
         self.policy = boot.get("snapshot")
         self.start_kernel()
+        # **The bootstrap runs before the helper preload, and that order is the invariant** (Key 221
+        # step 2, pan/notes/panlib-layout/no-helpers.md). The helpers land later and win on any name they
+        # share with the bootstrap, so the bootstrap can only ever ADD names -- which is what makes the
+        # diff between the two surfaces something I can read instead of a silent overwrite. Measured on
+        # this box before the change: of 122 names the bootstrap binds, exactly one (`client`) is replaced
+        # by a helper, and it lands on the helper's version, which is what already runs today.
+        #
+        # A bootstrap that fails must not take the session with it: the helpers still load and the ready
+        # event says what happened. Upstream learned the other half of this in 1808497 -- a boot step with
+        # no deadline hangs every cell after it -- but a run_cell that raises returns an error, it does not
+        # hang, so the bound here is the one the lifecycle already puts on the whole boot.
+        bootstrap = (boot.get("bootstrap") or "").strip()
+        bres = None
+        if bootstrap:
+            self.run_cell(self.BASELINE_CODE, emit_stream=False)
+            res = self.run_cell(bootstrap, emit_stream=False)
+            self.run_cell(self.BOOT_NAMES_CODE, emit_stream=False)
+            bres = {"ok": res["status"] == "ok", "line": bootstrap}
+            if not bres["ok"]:
+                err = res["error"] or {}
+                bres["error"] = (err.get("name") + ": " + err.get("message", "")).strip() or "failed to run"
+                print(f"[pi-repl] bootstrap failed, helpers loading anyway: {bres['error']}", file=sys.stderr)
         report = []
         for h in boot.get("helpers") or []:
             res = self.run_cell(h["source"], emit_stream=False)
@@ -398,7 +433,7 @@ class Bridge:
                 err = res["error"] or {}
                 report.append({"name": h["name"], "ok": False,
                                "error": (err.get("name") + ": " + err.get("message", "")).strip() or "failed to load"})
-        self.emit({"type": "ready", "helpers": report})
+        self.emit({"type": "ready", "helpers": report, "bootstrap": bres})
 
     def op_exec(self, op):
         res = self.run_cell(op["code"], emit_stream=True, emit_id=op["id"])

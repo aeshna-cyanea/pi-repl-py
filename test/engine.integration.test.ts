@@ -49,8 +49,20 @@ function withHelperIsolation(opts: Record<string, unknown>): Record<string, unkn
 	return { ...opts, env: { ...given, PI_HELPERS_GLOBAL_DIR: isolatedHelpers() } };
 }
 
+/**
+ * Bootstrap isolation, same reasoning one layer over: the default injected line is the OPERATOR's
+ * package, so on my box every test would boot 122 of my verbs. Tests that mean to exercise the
+ * bootstrap pass PI_REPL_BOOTSTRAP themselves; this default covers the ones that never meant to run
+ * boot-time code at all. An empty string is the documented off switch, not a missing value.
+ */
+function withBootIsolation(opts: Record<string, unknown>): Record<string, unknown> {
+	const given = (opts.env ?? {}) as Record<string, unknown>;
+	if (given.PI_REPL_BOOTSTRAP !== undefined) return opts;
+	return { ...opts, env: { ...given, PI_REPL_BOOTSTRAP: "" } };
+}
+
 function engine(opts: Record<string, unknown>) {
-	const m = new EngineManager(withHelperIsolation(opts) as never);
+	const m = new EngineManager(withBootIsolation(withHelperIsolation(opts)) as never);
 	engines.push(m);
 	return m;
 }
@@ -325,6 +337,81 @@ print(os.getcwd() != ${JSON.stringify(d)})`);
 			expect(report!.filter((h) => h.ok).map((h) => h.name)).toEqual(["core", "web"]);
 			expect(report!.some((h) => !h.ok)).toBe(false);
 			expect(m.takeHelperReport()).toBeNull();
+		},
+	);
+
+	test(
+		"the bootstrap runs BEFORE the helper preload, and a helper reads and then wins on its name",
+		{ timeout: 60_000 },
+		async () => {
+			// Key 221 step 2's invariant, as a fact about the running kernel rather than a comment.
+			// The helper file reads `boot_marker` at module level: if the preload ran first this is a
+			// NameError and the helper fails to load. Reading it and then rebinding it proves both halves
+			// of the invariant -- the bootstrap lands first, and the helper gets the last word.
+			const d = tempDir();
+			const helpers = tempDir();
+			writeFileSync(
+				join(helpers, "reader.py"),
+				"boot_marker = boot_marker + '+HELPER'\ndef marker():\n    return boot_marker\n",
+			);
+			const m = engine({
+				cwd: d,
+				env: { PI_HELPERS_DIR: helpers, PI_REPL_BOOTSTRAP: "boot_marker = 'BOOT'" },
+			});
+
+			const r = await m.execute("print(marker())");
+			expect(r.status).toBe("ok");
+			expect(r.stdout.trim()).toBe("BOOT+HELPER");
+
+			// a bootstrap that SUCCEEDS adds no entry to the helper report: the report stays a list of
+			// helpers, and only a failure earns a line
+			const report = m.takeHelperReport();
+			expect(report!.some((h) => h.name === "bootstrap")).toBe(false);
+		},
+	);
+
+	test(
+		"a bootstrap that raises takes nothing with it: the helpers load, and the report names it",
+		{ timeout: 60_000 },
+		async () => {
+			const d = tempDir();
+			const helpers = tempDir();
+			writeFileSync(join(helpers, "double.py"), "def double(n):\n    return n * 2\n");
+			const m = engine({
+				cwd: d,
+				env: { PI_HELPERS_DIR: helpers, PI_REPL_BOOTSTRAP: "raise RuntimeError('no bootstrap today')" },
+			});
+
+			const r = await m.execute("print(double(21))");
+			expect(r.status).toBe("ok");
+			expect(r.stdout.trim()).toBe("42"); // the session works on the helpers alone
+
+			const report = m.takeHelperReport();
+			const boot = report!.find((h) => h.name === "bootstrap");
+			expect(boot?.ok).toBe(false);
+			expect(boot?.error).toContain("no bootstrap today");
+			expect(report!.find((h) => h.name === "double")?.ok).toBe(true);
+		},
+	);
+
+	test(
+		"what the bootstrap binds is not snapshotted: the package comes back on every boot",
+		{ timeout: 60_000 },
+		async () => {
+			// Same rule that keeps the helper names out of the namespace file. Without it the bootstrap's
+			// verbs eat the same byte cap my real bindings share, and `saved` stops being a list of state.
+			const d = tempDir();
+			const snap = { path: join(d, "ns.snapshot"), debounceMs: 200 };
+			const m = engine({ cwd: d, snapshot: snap, env: { PI_REPL_BOOTSTRAP: "boot_only = 1" } });
+
+			await m.execute("mine = 3");
+			const saved = await m.snapshotState();
+			expect(saved?.saved).toContain("mine");
+			expect(saved?.saved).not.toContain("boot_only");
+
+			// and the name is still live in the kernel -- the exclusion is from the snapshot, not from the run
+			const r = await m.execute("print(boot_only)");
+			expect(r.stdout.trim()).toBe("1");
 		},
 	);
 
