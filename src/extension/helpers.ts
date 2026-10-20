@@ -36,6 +36,10 @@ const SURFACE_QUERY_MAX_BUFFER = 4 * 1024 * 1024;
 /** Stable text, deliberately NOT a timestamp: a query that fails every run would otherwise change the
  *  system prompt's bytes every run, and the always-loaded block is a prompt-cache boundary. */
 const STALE_NOTE = "STALE";
+/** A helper that answers for itself has no literal to fall back to — Key 221 part 3 deletes it. So the
+ *  third degradation is not a stale copy, it is an ABSENCE, and it must not borrow the word STALE: an
+ *  absence labelled as a stale copy is the same lie this whole path exists to prevent, wearing a hat. */
+const NO_BLOCK_NOTE = "NO BLOCK";
 
 export interface HelperOptions {
 	pythonPath?: string;
@@ -77,21 +81,38 @@ function querySurface(path: string, pythonPath: string): string {
  * The description for one helper file: queried when the file opts in, scraped when it does not. A failed
  * *query* never quietly becomes the literal -- the entry names which text it is and why, because the
  * failure mode this whole change exists to kill is a prompt that looks fine and describes something else.
+ *
+ * Three ways down, in order of how much text survives:
+ * 1. a cached render from an earlier good query -- the words are right, their freshness is not;
+ * 2. a scraped literal -- a COPY, and the file may not have one any more (Key 221 part 3 deletes the
+ *    generated literal from `pan.py`, because a second copy of the answer is what step 4 removed);
+ * 3. no block at all this run. Nothing else on the line names the helper -- the description's first
+ *    line is what normally does that -- so the note carries the name and says what is missing: the
+ *    *description* failed, not the binding, so the names may well still be live. Claiming either way
+ *    would be a guess; the repair command is the answer, and it is cheap to run.
  */
 function describeHelper(path: string, source: string, opts: HelperOptions): string {
 	if (!source.includes(SURFACE_QUERY_MARKER)) return parseDescription(source);
 	const cache = opts.cache ?? surfaceCache;
 	const run = opts.query ?? querySurface;
+	const python = opts.pythonPath ?? resolvePythonPath(undefined);
 	try {
-		const block = run(path, opts.pythonPath ?? resolvePythonPath(undefined));
+		const block = run(path, python);
 		cache.set(path, block);
 		return block;
 	} catch (error) {
 		const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
 		const cached = cache.get(path);
-		const base = cached ?? parseDescription(source);
-		const from = cached ? "cached render" : "scraped literal";
-		return `${base}\n(${STALE_NOTE}: ${from}; the live query failed: ${reason})`;
+		if (cached) return `${cached}\n(${STALE_NOTE}: cached render; the live query failed: ${reason})`;
+		const literal = parseDescription(source);
+		if (literal) return `${literal}\n(${STALE_NOTE}: scraped literal; the live query failed: ${reason})`;
+		// formatHelperLine prints no name of its own: the description's first line is what names the
+		// bullet. With no description there is no first line, so the note has to carry the name.
+		const stem = path.split(/[\\/]/).pop()?.replace(/\.py$/, "") ?? path;
+		return (
+			`(${NO_BLOCK_NOTE} for ${stem}: the live query failed: ${reason}; the verbs may still be ` +
+			`bound -- this is the description path, not the binding; repair: ${python} ${path} ${SURFACE_QUERY_ARG})`
+		);
 	}
 }
 

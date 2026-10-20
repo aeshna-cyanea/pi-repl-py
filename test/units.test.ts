@@ -28,8 +28,10 @@ import {
 	buildHelpersMap,
 	buildHelpersMapForCwd,
 	buildHelpersPromptSection,
+	formatHelpersBlock,
 	helperEntriesForCwd,
 	parseSurfaceAnswer,
+	SURFACE_QUERY_ARG,
 	SURFACE_QUERY_MARKER,
 	formatDivergenceNote,
 } from "../src/extension/helpers.js";
@@ -359,6 +361,48 @@ describe("helper boot announcements", () => {
 		expect(e.description).toContain("STALE");
 		expect(e.description).toContain("scraped literal");
 		expect(e.description).toContain("python not found");
+	});
+
+	// --- the third way down: a self-rendering helper has NO literal to fall back to ---------------------
+	// Key 221 part 3 deletes the generated literal from pan.py. Under the old two-way fallback this case
+	// returned "" plus "(STALE: scraped literal ...)" — a note advertising a copy that does not exist,
+	// which is the same lie step 4 exists to kill, wearing a hat. So this test's job is to refuse it.
+	test("a failed query with no cache AND no literal says there is no block, and never claims a copy", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-surface-noblock-"));
+		// a self-rendering helper as it exists after part 3: the marker, and no helper_description at all
+		writeFileSync(join(dir, "selfrender.py"), `${SURFACE_QUERY_MARKER}\ndef selfrender(): ...\n`);
+		const cache = new Map<string, string>();
+		const opts = {
+			cache,
+			pythonPath: "/venv/bin/python3",
+			query: () => {
+				throw new Error("ModuleNotFoundError: no module named panlib");
+			},
+		};
+		const e = helperEntriesForCwd(dir, undefined, dir, opts)[0];
+		// non-vacuity: there is nothing in this file to scrape
+		expect(readFileSync(join(dir, "selfrender.py"), "utf8")).not.toContain("helper_description");
+		expect(e.description).not.toContain("scraped literal");
+		expect(e.description).not.toContain("cached render");
+		// an absence is not a stale copy, so it must not borrow the STALE label
+		expect(e.description).toContain("NO BLOCK");
+		expect(e.description).toContain("ModuleNotFoundError");
+		// the claim that decides what I do next: the DESCRIPTION path failed, the binding may be fine
+		expect(e.description).toContain("may still be bound");
+		expect(e.description).toContain("not the binding");
+		// and the repair is copy-pasteable, naming the SAME interpreter the kernel got
+		expect(e.description).toContain("repair: /venv/bin/python3 ");
+		expect(e.description).toContain(join(dir, "selfrender.py"));
+		expect(e.description).toContain(`${SURFACE_QUERY_ARG})`);
+		// stable bytes, and a failed run must not seed the cache with its own note
+		expect(helperEntriesForCwd(dir, undefined, dir, opts)[0].description).toBe(e.description);
+		expect(cache.size).toBe(0);
+		// the note is one line: it sits in the always-loaded block, and a report-shaped note is one I skim
+		expect(e.description).not.toContain("\n");
+		// the note carries the helper's name -- the description's first line normally names the bullet,
+		// and here there is no first line, so without this the failure is a hole with no owner
+		const block = formatHelpersBlock([e]) ?? "";
+		expect(block).toContain("NO BLOCK for selfrender");
 	});
 
 	// --- the divergence note: what the live kernel binds, against the block being advertised -----------
