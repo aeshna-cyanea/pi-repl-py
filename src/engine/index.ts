@@ -11,7 +11,9 @@ function installVenvPython(): string {
 	return join(homedir(), ".pi", "agent", "pi-repl", "venv", "bin", "python3");
 }
 
-function resolvePythonPath(_cwd: string | undefined): string {
+/** Exported because the helper-description query needs the SAME interpreter the kernel gets: two rules for
+ *  "which python" is one rule that drifts. */
+export function resolvePythonPath(_cwd: string | undefined): string {
 	// --- only the install venv: a repo `.venv` may lack ipykernel and would shadow the good one ---
 	const installVenv = installVenvPython();
 	if (existsSync(installVenv)) return installVenv;

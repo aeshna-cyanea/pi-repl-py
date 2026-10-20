@@ -24,7 +24,14 @@ import {
 	pruneSnapshotDirs,
 } from "../src/engine/index.js";
 import { type CellResult, DEFAULT_BOOTSTRAP, KernelClient } from "../src/engine/kernel.js";
-import { buildHelpersMap, buildHelpersMapForCwd, buildHelpersPromptSection } from "../src/extension/helpers.js";
+import {
+	buildHelpersMap,
+	buildHelpersMapForCwd,
+	buildHelpersPromptSection,
+	helperEntriesForCwd,
+	parseSurfaceAnswer,
+	SURFACE_QUERY_MARKER,
+} from "../src/extension/helpers.js";
 import { buildPromptGuidelines } from "../src/extension/prompt.js";
 import {
 	backgroundFor,
@@ -270,6 +277,94 @@ describe("helper boot announcements", () => {
 		const bullet = buildHelpersMap(dir).find((b) => b.includes("bare"));
 		expect(bullet).toContain("triple-quoted");
 		expect(bullet).toContain("bare.__doc__");
+	});
+
+	test("a helper that carries the marker is QUERIED, not scraped", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-surface-"));
+		writeFileSync(
+			join(dir, "selfrender.py"),
+			`${SURFACE_QUERY_MARKER}\nhelper_description = """the scraped literal."""\n`,
+		);
+		const calls: string[] = [];
+		const entries = helperEntriesForCwd(dir, undefined, dir, {
+			query: (path) => {
+				calls.push(path);
+				return "the queried block";
+			},
+		});
+		expect(entries.map((e) => e.description)).toEqual(["the queried block"]);
+		expect(calls).toEqual([join(dir, "selfrender.py")]);
+		// non-vacuity: the literal is still in the file, so "not scraped" is a real claim
+		expect(readFileSync(join(dir, "selfrender.py"), "utf8")).toContain("the scraped literal");
+	});
+
+	test("a helper without the marker never spawns a query", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-surface-off-"));
+		writeFileSync(join(dir, "plain.py"), 'helper_description = """plain literal."""\n');
+		let calls = 0;
+		const entries = helperEntriesForCwd(dir, undefined, dir, {
+			query: () => {
+				calls += 1;
+				return "should never be used";
+			},
+		});
+		expect(entries.map((e) => e.description)).toEqual(["plain literal."]);
+		expect(calls).toBe(0);
+	});
+
+	test("a failed query degrades to a VISIBLE cache, never to a silent source", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-surface-fail-"));
+		writeFileSync(
+			join(dir, "selfrender.py"),
+			`${SURFACE_QUERY_MARKER}\nhelper_description = """the scraped literal."""\n`,
+		);
+		const cache = new Map<string, string>();
+		const opts = {
+			cache,
+			query: (() => {
+				let n = 0;
+				return () => {
+					n += 1;
+					if (n === 1) return "the good block";
+					throw new Error("exit code 2\ntraceback noise");
+				};
+			})(),
+		};
+		// first run succeeds and seeds the cache
+		expect(helperEntriesForCwd(dir, undefined, dir, opts)[0].description).toBe("the good block");
+		// second run fails: the cached text survives, and the block says it is a cache and why
+		const stale = helperEntriesForCwd(dir, undefined, dir, opts)[0].description;
+		expect(stale).toContain("the good block");
+		expect(stale).toContain("STALE");
+		expect(stale).toContain("cached render");
+		expect(stale).toContain("exit code 2"); // the reason, first line only
+		expect(stale).not.toContain("traceback noise");
+		// stable bytes: a query that fails every run must not change the prompt's bytes every run
+		expect(helperEntriesForCwd(dir, undefined, dir, opts)[0].description).toBe(stale);
+		// the failed run must not overwrite the good cache
+		expect(cache.get(join(dir, "selfrender.py"))).toBe("the good block");
+	});
+
+	test("a failed query with no cache falls back to the literal, and says that too", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-repl-surface-nocache-"));
+		writeFileSync(join(dir, "selfrender.py"), `${SURFACE_QUERY_MARKER}\nhelper_description = """the literal."""\n`);
+		const e = helperEntriesForCwd(dir, undefined, dir, {
+			cache: new Map(),
+			query: () => {
+				throw new Error("python not found");
+			},
+		})[0];
+		expect(e.description).toContain("the literal.");
+		expect(e.description).toContain("STALE");
+		expect(e.description).toContain("scraped literal");
+		expect(e.description).toContain("python not found");
+	});
+
+	test("parseSurfaceAnswer: the contract is one non-empty string under block", () => {
+		expect(parseSurfaceAnswer('{"block":"hi"}')).toBe("hi");
+		expect(() => parseSurfaceAnswer("not json")).toThrow("not JSON");
+		expect(() => parseSurfaceAnswer('{"block":""}')).toThrow("non-empty");
+		expect(() => parseSurfaceAnswer('{"names":41}')).toThrow("non-empty");
 	});
 
 	test("formatHelperFailuresLine: silent when good, one line when broken", () => {
