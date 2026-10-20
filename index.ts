@@ -8,6 +8,7 @@ import { Type } from "typebox";
 import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
 import {
 	type HelperEntry,
+	formatDivergenceNote,
 	formatHelperLine,
 	formatHelpersBlock,
 	helperEntriesForCwd,
@@ -323,7 +324,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- pi gates skills on the read tool (absent in repl); the helper roster is rebuilt per session from the session cwd, not the launch cwd, so resumes advertise what the kernel loaded ---
-	pi.on("before_agent_start", (event, ctx) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		if (!active()) return;
 		const skillsPrompt = withSkillsBlock(event.systemPrompt, event.systemPromptOptions?.skills ?? []);
 		let systemPrompt = skillsPrompt ?? event.systemPrompt;
@@ -331,7 +332,16 @@ export default function (pi: ExtensionAPI) {
 		// stash what we are about to advertise, so `repl status` can answer the one question that matters
 		// about a helper edit: is the model looking at text that matches the file on disk right now?
 		const entries = helperEntriesForCwd(cwd, process.env.PI_HELPERS_GLOBAL_DIR, process.env.PI_HELPERS_DIR);
-		const helpersBlock = formatHelpersBlock(entries);
+		// --- the divergence note: only a LIVE kernel can disagree with the block, and only this place can ask
+		// it before the prompt is built. One line, at the end of the block, and nothing at all when clean.
+		let helpersBlock = formatHelpersBlock(entries);
+		if (helpersBlock) {
+			const engine = lifecycle.current;
+			if (engine?.isRunning) {
+				const note = formatDivergenceNote(await engine.surfaceDivergences());
+				if (note) helpersBlock = `${helpersBlock}\n${note}`;
+			}
+		}
 		advertised = { entries, block: helpersBlock, at: Date.now() };
 		if (helpersBlock) systemPrompt = `${systemPrompt}\n\n${helpersBlock}`;
 		return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };

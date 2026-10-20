@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveHelperDirs } from "../engine/helpers-locate.js";
 import { resolvePythonPath } from "../engine/index.js";
+import type { SurfaceAnswer, SurfaceDivergence } from "../engine/kernel.js";
 
 const DEFAULT_HELPERS_DIR = join(homedir(), ".pi", "agent", "pi-repl", "helpers");
 
@@ -170,6 +171,47 @@ export function formatHelpersBlock(entries: readonly HelperEntry[]): string | un
 		"If output begins with <repl_helpers_failed>, those helpers failed to load at boot — do not call the listed names.",
 	];
 	return lines.join("\n");
+}
+
+/** One divergence into words the model acts on. Keyed on `kind`, because panlib's own `why` is written for
+ *  me reading a report, not for a system prompt: the same fact in 120 chars is a note I read, and in 34 lines
+ *  it is a note I route around. */
+function divergenceClause(rec: SurfaceDivergence): string {
+	switch (rec.kind) {
+		case "generation":
+			return `${rec.count} flat names are a pre-reload generation`;
+		case "class":
+			return `${rec.name}'s class is stale under it`;
+		case "signature":
+			return `${rec.name}'s live signature lacks what the block shows`;
+		case "unbound":
+			return `${rec.name} is never bound here`;
+		case "kind":
+			return `${rec.name} is bound as the wrong kind`;
+		default:
+			return `${rec.kind} ${rec.name ?? ""}`.trim();
+	}
+}
+
+function divergenceRepair(rec: SurfaceDivergence): string {
+	return rec.kind === "class" || rec.kind === "kind" ? "rebind the name" : "helpers_reload()";
+}
+
+/** The note, at most ONE line, appended at the END of the block: a change invalidates the prompt cache from
+ *  the change point onward, so end-of-prompt costs the tools payload and not the conversation. Empty when the
+ *  kernel agrees, and empty when there is no kernel -- a cold kernel IS the boot preload, so it cannot be
+ *  stale, and silence there is correct rather than a missed warning. */
+export function formatDivergenceNote(answer: SurfaceAnswer | null | undefined): string {
+	if (!answer) return "";
+	if (answer.error) return `(STALE BINDINGS: the live kernel could not answer: ${answer.error.split("\n")[0]})`;
+	const records = answer.divergences ?? [];
+	if (records.length === 0) return "";
+	// Two clauses, not three: the point of the note is that I ACT on it, and a line that reads like a report
+	// is a line I skim. The full detail is one `surface(name)` call away, which I take deliberately.
+	const clauses = records.slice(0, 2).map(divergenceClause);
+	const more = records.length - clauses.length;
+	const repairs = [...new Set(records.map(divergenceRepair))];
+	return `(STALE BINDINGS in the live kernel: ${clauses.join("; ")}${more > 0 ? ` (+${more} more)` : ""}; repair: ${repairs.join(" / ")})`;
 }
 
 /** System-prompt block for this session's helpers; undefined when there are none. */

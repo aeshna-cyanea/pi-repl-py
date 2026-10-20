@@ -7,6 +7,27 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveHelperDirs } from "./helpers-locate.js";
 
+/** A wedged bridge must not own the prompt build: this op answers a question the prompt can live without. */
+const SURFACE_TIMEOUT_MS = 4_000;
+
+/** One divergence as panlib reports it. `kind` is the contract; the host renders each shape in its own words
+ *  rather than pasting panlib's prose into a system prompt. The RULE lives in panlib, not here. */
+export interface SurfaceDivergence {
+	kind: string; // unbound | kind | signature | class | generation
+	name?: string | null;
+	count?: number;
+	names?: string[];
+	why?: string;
+	block?: string;
+	live?: string;
+	repair?: string;
+}
+
+export interface SurfaceAnswer {
+	divergences?: SurfaceDivergence[];
+	error?: string;
+}
+
 const SILENCE_KILL_GRACE_MS = 2000;
 /** The bridge ships at the package root, next to index.ts; src/engine is two levels deep. */
 const BRIDGE_PATH = fileURLToPath(new URL("../../bridge.py", import.meta.url));
@@ -317,7 +338,7 @@ export class KernelClient {
 		return result;
 	}
 
-	/** A request/reply op: snapshot, restore, listNames, shutdown. Serialized with cells. */
+	/** A request/reply op: snapshot, restore, listNames, surface, shutdown. Serialized with cells. */
 	private request(msg: Record<string, unknown>, timeoutMs?: number): Promise<BridgeMessage> {
 		return this.enqueue(() => {
 			const id = `r${this.nextId++}`;
@@ -528,6 +549,19 @@ export class KernelClient {
 		return this.request({ op: "listNames" }).then((msg) => {
 			const names = (msg as { names?: unknown }).names;
 			return Array.isArray(names) ? (names as string[]) : [];
+		});
+	}
+
+	/** What the live kernel's flat bindings actually are, against the block the host is about to advertise.
+	 *  The RULE lives in panlib (`binding_divergence`); this only carries the answer. Bounded, because a
+	 *  wedged bridge must not own a prompt build. */
+	surface(): Promise<SurfaceAnswer> {
+		return this.request({ op: "surface" }, SURFACE_TIMEOUT_MS).then((msg) => {
+			const m = msg as { divergences?: unknown; error?: unknown };
+			return {
+				divergences: Array.isArray(m.divergences) ? (m.divergences as SurfaceDivergence[]) : undefined,
+				error: typeof m.error === "string" ? m.error : undefined,
+			};
 		});
 	}
 

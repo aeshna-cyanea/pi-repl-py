@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { type HelperLoadResult, KernelClient } from "./kernel.js";
+import { type HelperLoadResult, KernelClient, type SurfaceAnswer } from "./kernel.js";
 
 export type { HelperLoadResult } from "./kernel.js";
 
@@ -566,6 +566,26 @@ export class EngineManager {
 	hasSnapshotHistory(): boolean {
 		const config = this.options.snapshot;
 		return config ? existsSync(dirname(config.path)) : false;
+	}
+
+	/** The divergence probe, and the two guards it needs: no kernel means no answer (a cold kernel is the
+	 *  boot preload, which is disk truth by construction), and a revive that has not landed would report
+	 *  revived names as unbound -- so the wait is bounded and a miss means no note, never a false alarm. */
+	async surfaceDivergences(): Promise<SurfaceAnswer | null> {
+		if (this.state !== "running" || !this.kernel) return null;
+		const settled = await Promise.race([
+			this.restoreResult().then(() => true),
+			new Promise<boolean>((resolve) => {
+				const timer = setTimeout(() => resolve(false), 3_000);
+				timer.unref?.();
+			}),
+		]);
+		if (!settled) return null;
+		try {
+			return await this.kernel.surface();
+		} catch {
+			return null;
+		}
 	}
 
 	async listNamespaceNames(): Promise<string[] | null> {

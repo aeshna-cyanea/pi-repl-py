@@ -47,6 +47,7 @@ from jupyter_client.kernelspec import NoSuchKernel
 SNAPSHOT_MIME = "application/vnd.pi-repl.snapshot+json"
 RESTORE_MIME = "application/vnd.pi-repl.restore+json"
 NAMES_MIME = "application/vnd.pi-repl.names+json"
+SURFACE_MIME = "application/vnd.pi-repl.surface+json"
 CARD_MIME = "application/vnd.pi-repl.card+json"
 READY_TIMEOUT_MS = 30_000
 
@@ -141,6 +142,23 @@ def names_code(helper_names):
             + "__repl_skip = set(" + skip_set_literal(helper_names) + ")\n"
             + "__repl_n = sorted(n for n in globals() if not n.startswith('_') and n not in __repl_skip)\n"
             + "get_ipython().display_pub.publish({" + json.dumps(NAMES_MIME) + ": _js.dumps(__repl_n)})\n")
+
+
+def surface_code():
+    # Do the flat bindings in THIS kernel agree with the block the host is about to advertise? The policy is
+    # panlib's (`binding_divergence`: unbound / wrong kind / stale signature / stale class / pre-reload
+    # generation, and how generation is counted rather than itemised); this program is one line of call and a
+    # publish, because a second copy of the rule would drift from the first. Key 221 step 4, 2026-10-20.
+    #
+    # A failure publishes an `error`, never an empty list: "I could not look" and "nothing diverges" are
+    # different answers, and the host renders the first as silence only because it cannot say more.
+    return ("import json as _js\n"
+            + "try:\n"
+            + "    import panlib.surface as _ps\n"
+            + "    __repl_o = {'divergences': _ps.binding_divergence(get_ipython().user_ns)}\n"
+            + "except Exception as _e:\n"
+            + "    __repl_o = {'error': '%s: %s' % (type(_e).__name__, _e)}\n"
+            + "get_ipython().display_pub.publish({" + json.dumps(SURFACE_MIME) + ": _js.dumps(__repl_o)})\n")
 
 
 class Bridge:
@@ -511,6 +529,16 @@ class Bridge:
         names = json.loads(res["payload"]) if res["payload"] is not None else []
         self.emit({"type": "reply", "id": op["id"], "names": names})
 
+    def op_surface(self, op):
+        # No payload means the cell produced nothing (wedged, or the publish never ran): answer with an
+        # error, not with an empty divergence list, so the host cannot read a fault as a clean bill.
+        res = self.run_cell(surface_code(), emit_stream=False, payload_mime=SURFACE_MIME)
+        if res["payload"] is None:
+            self.emit({"type": "reply", "id": op["id"], "error": "the surface probe published nothing"})
+            return
+        body = json.loads(res["payload"])
+        self.emit(dict({"type": "reply", "id": op["id"]}, **body))
+
     # ----- main loop -----
 
     def serve(self):
@@ -548,6 +576,8 @@ class Bridge:
                         self.op_restore(op)
                 elif o == "listNames":
                     self.op_names(op)
+                elif o == "surface":
+                    self.op_surface(op)
                 elif o == "interrupt":
                     self.interrupt()
                 elif o == "shutdown":

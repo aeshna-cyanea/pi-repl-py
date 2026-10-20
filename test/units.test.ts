@@ -31,6 +31,7 @@ import {
 	helperEntriesForCwd,
 	parseSurfaceAnswer,
 	SURFACE_QUERY_MARKER,
+	formatDivergenceNote,
 } from "../src/extension/helpers.js";
 import { buildPromptGuidelines } from "../src/extension/prompt.js";
 import {
@@ -358,6 +359,38 @@ describe("helper boot announcements", () => {
 		expect(e.description).toContain("STALE");
 		expect(e.description).toContain("scraped literal");
 		expect(e.description).toContain("python not found");
+	});
+
+	// --- the divergence note: what the live kernel binds, against the block being advertised -----------
+	test("a kernel that agrees with the block pays nothing, and so does the absence of a kernel", () => {
+		expect(formatDivergenceNote({ divergences: [] })).toBe("");
+		expect(formatDivergenceNote(null)).toBe("");
+		expect(formatDivergenceNote(undefined)).toBe("");
+	});
+
+	test("a fault is never read as clean: an error answer names the fault", () => {
+		const note = formatDivergenceNote({ error: "ModuleNotFoundError: no module named panlib" });
+		expect(note).toContain("STALE BINDINGS");
+		expect(note).toContain("could not answer");
+		expect(note).toContain("ModuleNotFoundError");
+	});
+
+	test("the note is ONE line, names the repair, and caps how many clauses it drowns me in", () => {
+		const note = formatDivergenceNote({
+			divergences: [
+				{ kind: "generation", count: 34, names: ["patch", "cap"] },
+				{ kind: "class", name: "git" },
+				{ kind: "signature", name: "patch" },
+				{ kind: "unbound", name: "sessions_index" },
+			],
+		});
+		expect(note).not.toContain("\n");
+		expect(note).toContain("34 flat names are a pre-reload generation");
+		expect(note).toContain("git's class is stale under it");
+		expect(note).toContain("repair: helpers_reload() / rebind the name");
+		expect(note).toContain("(+2 more)");
+		// Priced, not vibes: this is an always-loaded line in the system prompt.
+		expect(note.length).toBeLessThan(200);
 	});
 
 	test("parseSurfaceAnswer: the contract is one non-empty string under block", () => {
