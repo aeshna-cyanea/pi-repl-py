@@ -113,10 +113,30 @@ one oversized line cannot own the budget while long JSON/reprs/errors pass whole
 get a 20-second grace, then the process group is killed and the next call rebuilds from the last
 snapshot.
 
-**History is off.** IPython's `In`/`Out` retention pins every last-expression result and cannot be
-reclaimed from a user cell (measured: 62 MB → 400+ MB after two bare big results, unrecoverable),
-so every execute goes out with `store_history: false`, bounding the kernel to the latest result.
-Results still publish over iopub: single-mode execution calls `sys.displayhook` regardless.
+**History is on; the object cache is off.** `store_history` is the flag that decides whether IPython
+increments `execution_count`, and that count is what *names* a compiled cell:
+`compiler.cache(cell, execution_count)` produces the file name `In[<n>]`. With it off, every cell of
+a session compiles under the same name, the cached source for that name is overwritten by the next
+cell, and a traceback cannot say which cell a frame came from. Measured on ipykernel/IPython 9.17
+with `boom()` defined in one cell and raised in another: history off renders both frames as
+`Cell In[1]`; history on renders the call site as `In[210]` and the definition as `In[206]`. An error
+that cannot name its cell is the price the old flag charged, and it was paying for a saving it did
+not deliver.
+
+The retention that `store_history: false` was credited with (0.6.12: 62 MB idle → 400+ MB after two
+bare big results, unrecoverable from a user cell) is not that flag's to prevent. What pins a result
+object is `DisplayHook.update_user_ns`: `_oh`/`_<n>`, plus three slots — `self._`, `self.__`,
+`self.___` — held on the hook **instance**, which is exactly why `del _` in a cell plus
+`gc.collect()` leaves the object alive. Three bare 20 MB results cost 59,540 kB in every mode,
+history on or off. The old flag bounded `_oh` only by accident: `prompt_count` never moves, so the
+cache held one colliding slot. So the bridge now runs `DisplayHook.do_full_cache = False` at boot
+(`RETENTION_CODE` in `bridge.py`): no `_oh`/`_<n>` cache, the three slots stay, and the pin becomes
+reclaimable from a cell — measured 58 MB freed, against 39 MB under the old settings and nothing
+freed with the full cache on. What history costs, same 200-cell run: +1.5 ms per cell mean
+(7.6 → 9.6 ms), ~1 MB of RSS for the source text, and one `history.sqlite` row per cell
+(446 KB on disk per 211 cells) — a plaintext copy of every cell, which is the one part of this that
+is not free. Results publish over iopub either way: single-mode execution calls `sys.displayhook`
+regardless of `store_history`, and the bridge reads the cell result from there.
 
 ## Helpers loading
 

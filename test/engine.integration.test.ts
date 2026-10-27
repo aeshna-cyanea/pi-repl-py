@@ -956,15 +956,16 @@ create: () =>
 		},
 	);
 
-	test("cells run with history off so results cannot accumulate", { timeout: 60_000 }, async () => {
-		// --- store_history is deliberately false on every execute (see executeRequest in
-		// --- session.ts): IPython retains each result object in In/Out, and that retention is
-		// --- NOT reclaimable from user cells — deleting Out and _/__/___ from user_ns and
-		// --- gc.collect() leaves the objects alive (measured: 62MB idle → >400MB after two
-		// --- bare big results, unrecoverable). Disabling history keeps the kernel flat: the
-		// --- display hook still publishes results on iopub (single-mode execution, independent
-		// --- of store_history), so the transcript keeps the value the retention would have held.
-		// --- This test pins the bound: many result-producing cells leave Out/In at most one. ---
+	test("cells keep cell identity, and no result object is pinned", { timeout: 60_000 }, async () => {
+		// --- store_history is TRUE and DisplayHook.do_full_cache is FALSE, and the two halves are the
+		// --- point. execution_count is what names a compiled cell (compiler.cache -> "In[<n>]"), so with
+		// --- history off every cell of a session shares one name, the cached source is overwritten every
+		// --- cell, and a traceback cannot say which cell a frame came from: both frames read "Cell In[1]".
+		// --- The retention the old flag was credited with is DisplayHook.update_user_ns (_oh / _<n>, plus
+		// --- three slots held on the hook instance), which history off bounded only by accident:
+		// --- prompt_count never moves, so _oh kept one colliding slot. The numbers, and the bare-20 MB
+		// --- probe that shows the pin was never the flag's to prevent: docs/ARCHITECTURE.md,
+		// --- "History is on; the object cache is off".
 		const d = tempDir();
 		const m = engine({ cwd: d });
 
@@ -976,12 +977,20 @@ result_${i}`);
 			expect(r.result).toContain(String(40 + i));
 		}
 
-		// history must not grow: at most one Out slot (the latest result) and no In accumulation
+		// history on: every cell keeps its own source under its own number.
+		// cache off: no result object accumulates in the Out dict.
 		const probe = await m.execute(
-			"print(len(get_ipython().user_ns.get('Out', {})) <= 1, len(get_ipython().user_ns.get('In', [])) <= 1)",
+			"print(len(get_ipython().user_ns['In']) > 8, len(get_ipython().user_ns.get('_oh', {})) <= 1)",
 		);
 		expect(probe.status).toBe("ok");
 		expect(probe.stdout.trim()).toBe("True True");
+
+		// the identity claim: a frame defined in one cell and raised in another names two different cells
+		await m.execute("def boom():\n    return 1/0\nboom");
+		const bad = await m.execute("boom()");
+		expect(bad.status).toBe("error");
+		const cells = new Set([...(bad.error?.stack ?? []).join("\n").matchAll(/In\[(\d+)\]/g)].map((x) => x[1]));
+		expect(cells.size).toBeGreaterThanOrEqual(2);
 	});
 
 	test("an unexpectedly-dead kernel is discovered and the next cell rebuilds", { timeout: 90_000 }, async () => {

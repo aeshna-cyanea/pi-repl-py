@@ -18,6 +18,20 @@
 
 ### Changed
 
+- Cell history is back ON, and the result-object cache is OFF. `store_history: false` (0.6.12) was
+  credited with stopping IPython from pinning result objects; measured on ipykernel/IPython 9.17 it
+  stops nothing — the pin is `DisplayHook`'s `_oh`/`_<n>` cache plus three slots (`_`, `__`, `___`)
+  held on the hook *instance*, and three bare 20 MB results cost the same 59,540 kB with the flag on
+  or off. What the flag did cost was cell identity: with it off `execution_count` never increments,
+  `compiler.cache` names every cell of the session `In[1]`, and a traceback can no longer say which
+  cell a frame came from — a `boom()` defined in one cell and raised in another renders both frames as
+  `Cell In[1]`, where with history on they render as `In[210]` and `In[206]`. So: every execute now
+  goes out with `store_history: true` (`PI_REPL_STORE_HISTORY=0` opts out), and the bridge boots the
+  kernel with `DisplayHook.do_full_cache = False`, which is the knob that actually bounds memory — the
+  big-result pin becomes reclaimable from a cell (measured 58 MB freed, against 39 MB under the old
+  settings and nothing freed with the full cache on). Cost of history, 200-cell run: +1.5 ms per cell
+  mean, ~1 MB of RSS, and one plaintext `history.sqlite` row per cell. The mechanism and every number
+  are in `docs/ARCHITECTURE.md` under "History is on; the object cache is off".
 - A cell's `result` is bounded on its own budget (`DEFAULT_MAX_RESULT_LINES = 40`,
   `DEFAULT_MAX_RESULT_CHARS = 4000`) instead of riding the 46 KB output channel. A result is the echo of
   a value nobody asked to see — if you wanted it, you bound it — and unlike stdout it needs no full copy

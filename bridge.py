@@ -51,6 +51,27 @@ SURFACE_MIME = "application/vnd.pi-repl.surface+json"
 CARD_MIME = "application/vnd.pi-repl.card+json"
 READY_TIMEOUT_MS = 30_000
 
+# --- cell history: ON, and that is a decision with a history of its own. ---------------
+# 0.6.12 turned store_history off because IPython was pinning result objects and a long
+# session grew past 400 MB. Measured again on ipykernel/IPython 9.17 (probe in
+# ~/.pi/pan/memory/findings/2026-10-27-store-history/, 200 cells x 3 modes): the flag buys
+# about 1 MB per 200 cells, and it does NOT touch the pin. The pin is DisplayHook
+# .update_user_ns -- _oh/_<n> plus three slots (self._, self.__, self.___) held on the hook
+# INSTANCE, which is why deleting _ / __ / ___ from user_ns and calling gc.collect() leaves
+# the objects alive. Three bare 20 MB results cost 59,540 kB in every mode, store_history
+# on or off; clearing the hook attrs from a user cell frees 39 MB with the old settings and
+# 58 MB with the cache off, and frees nothing while the full _oh cache is on.
+#
+# What store_history=False actually cost was cell identity. run_cell takes
+# execution_count = self.execution_count and only increments it when store_history is true
+# (interactiveshell.py:3437-3440), and compiler.cache(cell, execution_count) names the
+# compiled cell from that count -- so with it off EVERY cell of a session compiles under the
+# name In[1], the source cache entry is overwritten every cell, and a traceback cannot say
+# which cell a frame came from (both frames read "Cell In[1]"). That is the memory saving
+# paying with the one thing an error needs. So: history on, and the object cache off (see
+# RETENTION_CODE below, run at boot). PI_REPL_STORE_HISTORY=0 is the escape.
+STORE_HISTORY = os.environ.get("PI_REPL_STORE_HISTORY", "1") != "0"
+
 # --- kernel-side programs. These run inside ipykernel, so they stay strings (now plain Python). ---
 
 def skip_set_literal(helper_names):
@@ -236,7 +257,7 @@ class Bridge:
         cell's msg_id below, so the pairing is structural and needs no bookkeeping of its own.
         """
         kc = self.kc
-        msg_id = kc.execute(code, silent=False, store_history=False,
+        msg_id = kc.execute(code, silent=False, store_history=STORE_HISTORY,
                             user_expressions={}, allow_stdin=False, stop_on_error=True)
         self.op_id = msg_id
         self.op_payload_mime = payload_mime
@@ -411,6 +432,19 @@ class Bridge:
                 return None
         return value if isinstance(value, dict) else None
 
+    # The object cache that store_history used to bound by accident. update_user_ns
+    # (displayhook.py:208-242) is NOT gated by store_history: under the old flag prompt_count
+    # never moved, so _oh kept one colliding slot. With history on that cache would keep up to
+    # cache_size (1000) result objects alive -- the 400 MB the old flag was credited with
+    # preventing. do_full_cache=False takes the cache away and keeps the three slots (_/__/___)
+    # IPython always holds. IPython itself guards the one caller that assumes the cache exists
+    # (interactiveshell.py:1516), and a cell can put the cache back with
+    # get_ipython().displayhook.do_full_cache = True.
+    RETENTION_CODE = (
+        "from IPython import get_ipython as _gi\n"
+        "_gi().displayhook.do_full_cache = False\n"
+    )
+
     # The two cells that fence the bootstrap. Both write under an underscore name, which is how the
     # snapshot's own `startswith('_')` rule keeps them out of the namespace it persists.
     BASELINE_CODE = "globals()['__repl_base'] = set(globals())"
@@ -420,6 +454,10 @@ class Bridge:
         self.helper_names = [h["name"] for h in boot.get("helpers") or []]
         self.policy = boot.get("snapshot")
         self.start_kernel()
+        # kernel-side settings that are not names: run before the bootstrap so the property holds
+        # for the bootstrap cell too. Runs with history on, so it is a numbered cell in the
+        # journal like every other cell this bridge sends -- honest, and cheap.
+        self.run_cell(self.RETENTION_CODE, emit_stream=False)
         # **The bootstrap runs before the helper preload, and that order is the invariant** (Key 221
         # step 2, pan/notes/panlib-layout/no-helpers.md). The helpers land later and win on any name they
         # share with the bootstrap, so the bootstrap can only ever ADD names -- which is what makes the
