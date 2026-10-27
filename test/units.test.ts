@@ -44,6 +44,7 @@ import {
 	closeOpenSgr,
 	type ExecuteRenderState,
 	formatDuration,
+	formatPreview,
 	paintBackground,
 	type RenderDeps,
 	readDiffCard,
@@ -1002,6 +1003,72 @@ describe("stream view bound", () => {
 		expect(r.text).toContain("note: the copy hit its own byte bound");
 		const clean = boundView(many(400), 120, "/x/cell-000015.txt", { lines: 400, bytes: 999_999 });
 		expect(clean.text).not.toContain("byte bound");
+	});
+
+	test("a head pre-cut by the kernel's channel ceiling always gets a marker", () => {
+		// The 2026-10-27 incident, reproduced as arithmetic: a cell printed ~80 KB of dict repr in 86 lines.
+		// kernel.ts accumulate() held 46,080 B of it, the tee held all of it, and boundView was handed a
+		// head of 66 lines whose byte length equalled its own maxChars -- so its `text.length <= maxChars`
+		// test passed, it declared the view untrimmed, and the model received 46,080 B ending mid-word
+		// with no notice anywhere in it. A view cannot decide from the survivor; it decides from the totals.
+		const unit = `${"y".repeat(479)}\n`; // 480 B a line, so the head can land ON the ceiling exactly
+		const head = unit.repeat(DEFAULT_MAX_OUTPUT_CHARS / unit.length); // 96 lines, exactly 46,080 B
+		expect(head.length).toBe(DEFAULT_MAX_OUTPUT_CHARS);
+		const r = boundView(head, 40, "/tmp/pan-out/stem/cell-000077.txt", {
+			lines: 86,
+			bytes: 79_667,
+			droppedBytes: 33_587,
+		});
+		expect(r.trimmed).toBe(true);
+		expect(r.text.split("\n").length).toBeLessThan(96); // the view's 40 lines, not the channel's 96
+		expect(r.shownLines).toBe(40);
+		expect(r.text).toContain("86 lines, 79667 chars"); // the TRUE totals, in the marker's own spelling
+		expect(r.text).toContain("dropped 33,587 bytes");
+		expect(r.text).toContain("complete copy is in the file above");
+		// and the same cut with no tee to point at must claim no path and say so
+		const nocopy = boundView(head, 40, undefined, { lines: 86, bytes: 79_667, droppedBytes: 33_587 });
+		expect(nocopy.text).toContain("no complete copy was written");
+		expect(nocopy.text).not.toContain("full text:");
+	});
+});
+
+describe("live preview bound", () => {
+	// The streaming branch of the execute tool used to hand the WHOLE accumulator to the pane: a cell that
+	// prints 46 KB put all 46 KB in front of the human while the model saw a bounded head of it. This is the
+	// only output path in the stack whose reader is the human rather than the model, so it needs its own pin.
+	const many = (n: number) => Array.from({ length: n }, (_, i) => `streamed line ${i}`).join("\n");
+
+	test("a preview over the view budget is cut, and says it is a preview", () => {
+		const r = boundView(many(500), 120, undefined, { preview: true });
+		expect(r.trimmed).toBe(true);
+		expect(r.text.split("\n").length).toBe(121); // 120 lines + the marker
+		expect(r.text).toContain("a bounded preview; the settled cell lands in full");
+		// and it must not claim the tee is off: mid-cell, the copy simply has not been written yet
+		expect(r.text).not.toContain("PI_REPL_CAPTURE_DIR is unset");
+		expect(r.text).not.toContain("full text:");
+	});
+
+	test("a short preview passes through with no marker at all", () => {
+		const r = boundView("one\ntwo", 120, undefined, { preview: true });
+		expect(r.trimmed).toBe(false);
+		expect(r.text).toBe("one\ntwo");
+	});
+
+	test("formatPreview bounds to the configured viewLines, not to a hard-coded number", () => {
+		const t = formatPreview(many(300), 10);
+		expect(t.split("\n").length).toBe(11); // 10 lines + the marker
+		expect(t).toContain("300 lines, "); // the chunks seen so far, never claimed as the cell's totals
+		expect(formatPreview("short", 10)).toBe("short");
+	});
+
+	test("the entry point actually routes the streamed preview through it", () => {
+		// index.ts is the one file no test in this repo can execute, so the wiring is pinned textually --
+		// the same shape as the env-knob pins: a parsed knob nobody hands over is an installed fix that
+		// never runs, and a bound nobody calls is the same bug wearing a different hat.
+		const ext = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf8");
+		expect(ext).toContain('import { formatPreview } from "./src/extension/render-core.js";');
+		expect(ext).toContain("formatPreview(streamed, config.viewLines)");
+		expect(ext).not.toContain('content: [{ type: "text", text: streamed }]');
 	});
 });
 

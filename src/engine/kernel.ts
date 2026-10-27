@@ -58,8 +58,8 @@ export interface KernelOptions {
 export interface StreamCapture {
 	path: string;
 	/** lines/bytes the tee holds for that channel; `cut` when the tee's own byte bound stopped it. */
-	stdout?: { lines: number; bytes: number; cut?: boolean };
-	stderr?: { lines: number; bytes: number; cut?: boolean };
+	stdout?: { lines: number; bytes: number; cut?: boolean; droppedBytes?: number };
+	stderr?: { lines: number; bytes: number; cut?: boolean; droppedBytes?: number };
 	/** Why no file was written, when the bridge declined (e.g. the kernel was never told its stem). */
 	reason?: string;
 }

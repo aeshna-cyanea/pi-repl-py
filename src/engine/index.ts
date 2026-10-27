@@ -166,25 +166,51 @@ export interface BoundView extends BoundResult { path?: string; cutByChars: bool
  *  the bytes it held before any cap ran -- so a bounded view never understates what it withheld, the
  *  same rule boundResult follows for a result echo. `path` is a pointer at the whole thing, not a
  *  summary of the head: peek(path, start=N+1) continues where this view stopped (peek's own default
- *  page size comes from PAN_VIEW_LINES, the same knob my view verbs read). */
+ *  page size comes from PAN_VIEW_LINES, the same knob my view verbs read).
+ *
+ *  `totals.droppedBytes` is the kernel's own channel cap biting BEFORE this function is reached:
+ *  `accumulate()` in kernel.ts holds at most `maxOutputChars` per channel and drops the rest, and that
+ *  ceiling is numerically equal to this function's own `maxChars` (46,080). A head that arrives pre-cut
+ *  to exactly the budget therefore reads as "nothing to trim" unless the TRUE totals decide the test,
+ *  and what lands in the transcript ends mid-word with no notice anywhere in it. Measured on this box
+ *  2026-10-27: one cell, 79,667 B teed, 46,080 B handed to the model, cut mid-word, zero disclosure --
+ *  and full of my own `show()` markers, which made the blob look bounded. So both the decision to bound
+ *  and the numbers in the marker come from `totals`, never from the surviving head. */
 export function boundView(
 	text: string,
 	maxLines: number = DEFAULT_OUTPUT_VIEW_LINES,
 	path?: string,
-	totals?: { lines: number; bytes: number; cut?: boolean },
+	/** Everything is optional on purpose: each field answers a different question, and a caller that only
+	 *  knows one of them (the preview knows `preview`, finalize knows the tee's counts) must be able to say
+	 *  just that. `lines`/`bytes` fall back to the text in hand when absent. */
+	totals?: { lines?: number; bytes?: number; cut?: boolean; droppedBytes?: number; preview?: boolean },
 	maxChars: number = DEFAULT_MAX_OUTPUT_CHARS,
 ): BoundView {
 	const lines = text.split("\n");
-	const shownLines = Math.min(lines.length, Math.max(0, maxLines));
 	const shown = totals?.lines ?? lines.length;
 	const chars = totals?.bytes ?? text.length;
-	if (lines.length <= maxLines && text.length <= maxChars) {
+	const dropped = totals?.droppedBytes ?? 0;
+	// The bound is decided on the TRUE line count, and a head the channel already cut always gets a
+	// marker however short it looks: a mid-word end with no notice is the failure this channel exists
+	// to kill, and it is invisible to a test that only ever sees whole streams arrive.
+	if (shown <= maxLines && text.length <= maxChars && dropped === 0) {
 		return { text, trimmed: false, lines: shown, shownLines: lines.length, chars, path, cutByChars: false };
 	}
-	let kept = lines.slice(0, shownLines).join("\n");
+	const shownLines = Math.min(shown, Math.max(0, maxLines));
+	let kept = shownLines < lines.length ? lines.slice(0, shownLines).join("\n") : text;
 	let tail = path
 		? `[... ${shown} lines, ${chars} chars — showed ${shownLines}. full text: ${path}]\n    next: peek('${path}', start=${shownLines + 1})`
-		: `[... ${shown} lines, ${chars} chars — showed ${shownLines}. PI_REPL_CAPTURE_DIR is unset: this cell has no complete copy ...]`;
+		: totals?.preview
+			? `[... ${shown} lines, ${chars} chars — showed ${shownLines}. a bounded preview; the settled cell lands in full ...]`
+			: `[... ${shown} lines, ${chars} chars — showed ${shownLines}. PI_REPL_CAPTURE_DIR is unset: this cell has no complete copy ...]`;
+	// named as its own sentence rather than folded into the totals: whose ceiling bit changes where the
+	// complete copy lives, and "the numbers above are not the cell's" is a different claim from "bytes
+	// were dropped on the way here".
+	if (dropped > 0) {
+		tail += path
+			? `\n    note: the kernel's output channel dropped ${dropped.toLocaleString("en-US")} bytes before this view; the complete copy is in the file above`
+			: `\n    note: the kernel's output channel dropped ${dropped.toLocaleString("en-US")} bytes before this view, and no complete copy was written`;
+	}
 	// the tee's own byte bound: those totals are what the tee HELD, not what the cell printed, and a
 	// marker that reports the smaller number without saying so is the lie this whole channel exists to avoid.
 	if (totals?.cut) tail += "\n    note: the copy hit its own byte bound — this cell is longer than the numbers above";
@@ -457,7 +483,14 @@ export class EngineManager {
 				// claimed, because a pointer at data we do not have is a lie, not a nicety.
 				const capture = r.capture;
 				const finalize = (text: string, channelTruncated: boolean, name: "stdout" | "stderr"): string => {
-					if (capture) return boundView(text, viewLines, capture.path, capture[name]).text;
+					if (capture) {
+						// The tee holds the cell's WHOLE stream; `text` is what the kernel's channel ceiling let
+						// through. When those two disagree, that difference is bytes the model never saw, and it is
+						// named for the view to render -- boundView refuses to call a pre-cut head "untrimmed".
+						const ch = capture[name];
+						const viewTotals = ch && channelTruncated ? { ...ch, droppedBytes: Math.max(0, ch.bytes - text.length) } : ch;
+						return boundView(text, viewLines, capture.path, viewTotals).text;
+					}
 					let out = truncateWithMarker(text, maxChars, channelTruncated);
 					const line = capLinesForContext(out);
 					if (line.trimmed) out = `${line.text}\n[... some lines exceeded ${MAX_OUTPUT_LINE_CHARS} chars ...]`;

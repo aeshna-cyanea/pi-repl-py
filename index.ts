@@ -39,6 +39,7 @@ import {
 	type ReplAction,
 } from "./src/extension/repl-tool.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./src/extension/render.js";
+import { formatPreview } from "./src/extension/render-core.js";
 import {
 	EngineLifecycle,
 	formatForkToast,
@@ -430,7 +431,11 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onStream: (chunk) => {
 						streamed += chunk;
-						onUpdate?.({ content: [{ type: "text", text: streamed }], details: {} });
+						// The accumulator keeps everything; what the pane is handed is the same line budget the
+						// settled render gets. Before this, the streaming branch pushed the whole accumulator and a
+						// cell that printed tens of KB scrolled all of it into the human's face while the model saw
+						// none of it -- the only output path in this stack with no bound on the human's side.
+						onUpdate?.({ content: [{ type: "text", text: formatPreview(streamed, config.viewLines) }], details: {} });
 					},
 				});
 				// --- reset notice leads so the model reads the rebuild; the human gets a terse toast instead ---

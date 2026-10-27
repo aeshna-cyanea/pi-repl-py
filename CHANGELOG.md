@@ -64,6 +64,35 @@
   the tests now pin: `text/plain` for a `str` is `repr(value)`, so a multi-line string arrives as a single
   line and the char budget, not the line budget, is what bounds it.
 
+- **A view now bounds on the cell's TRUE totals, and a head the channel pre-cut always gets a marker.**
+  Found by measuring my own session 2026-10-27: one cell printed ~80 KB of dict repr in 86 lines. The
+  kernel's channel ceiling (`accumulate()`, 46,080 B) held exactly that many bytes of it — 66 of those
+  lines — the tee held all of it, and `boundView()` decided "is this trimmed?" from the bytes it was
+  *handed*: a head whose length equalled its own `maxChars`, so it declared the view untrimmed and the
+  model got a 46,080 B block ending mid-word with **no notice anywhere in it**, while the `show()` markers
+  inside that blob made it read like deliberately paged output. The human's screen had been shown up to
+  the same ~45 KB of live preview. Two halves now: `finalize()` passes the tee's per-channel totals plus
+  the kernel's `truncated` flag as a `droppedBytes` count, so the marker states the true totals and points
+  at the complete copy; and the marker is emitted whenever bytes were dropped upstream, whatever the view
+  budget would have done. A pre-cut head can no longer pass as untrimmed. The test pins the incident as
+  arithmetic — a head at exactly 46,080 B under a 40-line budget, true totals 86 lines / 79,667 B, the
+  note rendering, and the dropped count named — plus the no-tee case, which must refuse to invent a path
+  and say plainly that the copy is missing. One inconsistency surfaced by writing that test, left alone
+  on purpose: the marker's own totals print unlocalised (`79667 chars`) while the new note localises its
+  count (`dropped 33,587 bytes`). One of the two should move; a test that asserts a format nobody chose
+  just freezes it.
+
+- **The live preview of a running cell is bounded to the same view budget the settled text gets.** The
+  streaming branch of the execute tool appended every chunk and handed the whole accumulator to `onUpdate`,
+  so a cell that printed 46 KB scrolled all 46 KB into the pane as live text while the model was reading a
+  capped head of it somewhere else — the one output path in this stack with no bound on the human's side.
+  It now runs through `formatPreview` (`render-core.ts`, pure and unit-testable, calling `boundView`), and
+  the accumulator stays whole so the settled render is unaffected. The numbers it states are the chunks seen
+  so far and its tail says so ("a bounded preview; the settled cell lands in full"); it does not claim
+  `PI_REPL_CAPTURE_DIR is unset`, because mid-cell that sentence would be false — the tee has simply not
+  written yet. The call is pinned textually in `index.ts` the way the env-knob wiring is, since no test in
+  this repo can execute the entry point.
+
 - The display card (Key 138) rides the kernel's own display channel — one JSON object published under
   `application/vnd.pi-repl.card+json` during a cell — instead of a file in `$TMPDIR`. The file needed a
   path, the path reached the kernel as a global injected at boot (`PAN_CARD_PATH`), and namespace state is

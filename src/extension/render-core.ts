@@ -77,6 +77,7 @@ export interface ExecuteRenderState {
 }
 
 import { previewCell } from "./preview/index.js";
+import { boundView } from "../engine/index.js";
 
 export type StatusKind = "error" | "aborted" | "running" | "queued" | "done";
 export type BgKind = "toolPendingBg" | "toolSuccessBg" | "toolErrorBg";
@@ -669,4 +670,22 @@ export function renderExecuteBody(state: ExecuteRenderState, width: number, deps
 
 export function renderExecuteCell(state: ExecuteRenderState, width: number, deps: RenderDeps): string[] {
 	return [...renderExecuteHeader(state, width, deps), ...renderExecuteBody(state, width, deps)];
+}
+
+/**
+ * The live preview of a still-running cell, bounded to the SAME view budget the settled text gets.
+ *
+ * Why this exists, measured 2026-10-27: the streaming branch of the execute tool appended every chunk and
+ * handed the whole accumulator to `onUpdate`, so a cell that prints tens of KB scrolled that much into the
+ * human's pane while the model never saw past the caps -- the one output path with no bound at all, because
+ * `boundView` only ran at finalize. Measured on the box: one cell put ~46 KB on her screen; the model got a
+ * 46,080 B head of it and the pane got the rest.
+ *
+ * The numbers it states are the chunks seen so far, never claimed as the cell's totals, and the tail says
+ * the settled render follows -- unlike the settled path it must NOT claim `PI_REPL_CAPTURE_DIR is unset`,
+ * because at that moment the tee has not written the copy yet. The character ceiling is left unbounded on
+ * purpose: the preview line budget is what protects the pane, and the caller already caps what it accumulates.
+ */
+export function formatPreview(text: string, viewLines: number): string {
+	return boundView(text, viewLines, undefined, { preview: true }).text;
 }
