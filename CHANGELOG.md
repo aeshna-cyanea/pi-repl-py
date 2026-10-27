@@ -26,7 +26,8 @@
   `compiler.cache` names every cell of the session `In[1]`, and a traceback can no longer say which
   cell a frame came from — a `boom()` defined in one cell and raised in another renders both frames as
   `Cell In[1]`, where with history on they render as `In[210]` and `In[206]`. So: every execute now
-  goes out with `store_history: true` (`PI_REPL_STORE_HISTORY=0` opts out), and the bridge boots the
+  goes out with `store_history: true` — mandatory, no env knob, because the daemon's refusal recovery
+  files a refused cell at the prompt number this call spends and cannot work without it — and the bridge boots the
   kernel with `DisplayHook.do_full_cache = False`, which is the knob that actually bounds memory — the
   big-result pin becomes reclaimable from a cell (measured 58 MB freed, against 39 MB under the old
   settings and nothing freed with the full cache on). Cost of history, 200-cell run: +1.5 ms per cell

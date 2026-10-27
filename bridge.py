@@ -69,8 +69,14 @@ READY_TIMEOUT_MS = 30_000
 # name In[1], the source cache entry is overwritten every cell, and a traceback cannot say
 # which cell a frame came from (both frames read "Cell In[1]"). That is the memory saving
 # paying with the one thing an error needs. So: history on, and the object cache off (see
-# RETENTION_CODE below, run at boot). PI_REPL_STORE_HISTORY=0 is the escape.
-STORE_HISTORY = os.environ.get("PI_REPL_STORE_HISTORY", "1") != "0"
+# RETENTION_CODE below, run at boot).
+#
+# There is deliberately no env knob for this, and it is not a style call. The refusal machinery
+# (~/.pi/pan/lib/panlib/kernel/refusals.py) files a cell that a gate refused at the number run_cell spent
+# on it, and that spend happens only under store_history: with it off, execution_count never moves, a
+# refused cell has no number to be filed at, and In[]/input_hist_raw/_i<n>/history.sqlite hold nothing
+# about the cells that never ran. A knob that can silently turn that off is a knob that turns off the
+# recovery path too. History is mandatory; memory is bounded by do_full_cache=False.
 
 # --- kernel-side programs. These run inside ipykernel, so they stay strings (now plain Python). ---
 
@@ -257,7 +263,8 @@ class Bridge:
         cell's msg_id below, so the pairing is structural and needs no bookkeeping of its own.
         """
         kc = self.kc
-        msg_id = kc.execute(code, silent=False, store_history=STORE_HISTORY,
+        # mandatory, not a knob -- see the cell-history note above it (the env knob went 2026-10-27)
+        msg_id = kc.execute(code, silent=False, store_history=True,
                             user_expressions={}, allow_stdin=False, stop_on_error=True)
         self.op_id = msg_id
         self.op_payload_mime = payload_mime
