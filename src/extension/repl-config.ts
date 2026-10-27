@@ -54,9 +54,23 @@ export interface ReplConfig {
 	 * 120 clips 3.4% of results, 60 clips 10.6%.
 	 */
 	viewLines: number;
+	/**
+	 * Bytes one cell's tee file may hold, in megabytes. It bounds a runaway loop, not a session: past this
+	 * the bridge writes what it held, says so INSIDE the file, and moves on. Handed to the bridge as
+	 * PI_REPL_CAPTURE_MAX_BYTES. The tier as a whole is NOT bounded here — retention of this directory is
+	 * panlib's job (HOT_CAP / ARCHIVE_CAP, now read from this same file), and two janitors for one tier is
+	 * how a capture ends up evicted by the wrong one.
+	 */
+	cellMaxMb: number;
 }
 
-export const DEFAULT_REPL_CONFIG: ReplConfig = { defaultOn: false, drop: [], captureDir: "", viewLines: 120 };
+export const DEFAULT_REPL_CONFIG: ReplConfig = {
+	defaultOn: false,
+	drop: [],
+	captureDir: "",
+	viewLines: 120,
+	cellMaxMb: 32,
+};
 
 /** Tolerant of junk, never throws, and says what it discarded. */
 export function parseReplConfig(raw: unknown, warn: (message: string) => void = console.warn): ReplConfig {
@@ -80,6 +94,11 @@ export function parseReplConfig(raw: unknown, warn: (message: string) => void = 
 	if (record.captureDir !== undefined) {
 		if (typeof record.captureDir === "string") next.captureDir = expandHome(record.captureDir);
 		else warn(`[pi-repl] config captureDir must be a path or "", got ${typeof record.captureDir}; ignoring`);
+	}
+	if (record.cellMaxMb !== undefined) {
+		const n = Number(record.cellMaxMb);
+		if (Number.isInteger(n) && n > 0) next.cellMaxMb = n;
+		else warn(`[pi-repl] config cellMaxMb must be a positive whole number of megabytes, got ${String(record.cellMaxMb)}; ignoring`);
 	}
 	if (record.viewLines !== undefined) {
 		const n = Number(record.viewLines);

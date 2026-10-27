@@ -226,6 +226,7 @@ export default function (pi: ExtensionAPI) {
 					// half-set knob reads exactly like a tee that works
 					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
 					PAN_VIEW_LINES: String(config.viewLines),
+					PI_REPL_CAPTURE_MAX_BYTES: String(config.cellMaxMb * 1024 * 1024),
 				},
 				// --- snapshots are per-conversation; skipRestore marks the wedged-boot retry ---
 				snapshot,

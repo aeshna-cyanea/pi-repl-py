@@ -1041,6 +1041,25 @@ describe("pi-repl.json config", () => {
 		},
 	);
 
+	// cellMaxMb is the one authored number behind PI_REPL_CAPTURE_MAX_BYTES; bridge.py's own 32 MiB is a
+	// default for a spawn with no config (a probe, a test), not a second policy for the same tier.
+	test("cellMaxMb bounds one cell's copy, and junk is ignored rather than obeyed", () => {
+		const warns: string[] = [];
+		expect(parseReplConfig({ cellMaxMb: 8 }, () => {}).cellMaxMb).toBe(8);
+		expect(parseReplConfig({ cellMaxMb: 0 }, (m) => warns.push(m)).cellMaxMb).toBe(32);
+		expect(parseReplConfig({ cellMaxMb: "lots" }, (m) => warns.push(m)).cellMaxMb).toBe(32);
+		expect(warns.length).toBe(2);
+		expect(DEFAULT_REPL_CONFIG.cellMaxMb).toBe(32);
+		// Nothing in this repo imports the extension entry (grep: no test reads ../index), so the wiring line
+		// inside create() cannot be executed here. It is pinned textually instead: a key that is parsed but
+		// never handed over is the "installed fix that never runs" shape, and a deliberate edit to this line
+		// should be exactly that — deliberate.
+		const ext = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf8");
+		expect(ext).toContain("PI_REPL_CAPTURE_MAX_BYTES: String(config.cellMaxMb * 1024 * 1024)");
+		expect(ext).toContain("PAN_VIEW_LINES: String(config.viewLines)");
+		expect(ext).toContain("PI_REPL_CAPTURE_DIR: config.captureDir");
+	});
+
 	test("captureDir and viewLines are read, and junk is reported rather than obeyed", () => {
 		const warns: string[] = [];
 		const cfg = parseReplConfig({ captureDir: "/tmp/pan-out", viewLines: 60 }, (m) => warns.push(m));
@@ -1165,13 +1184,13 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 		// Whole-object pins on purpose: a new config field has to earn its default here, in the open.
 		// captureDir "" means the tee is off; viewLines 120 is the measured view budget.
 		const missing = mkdtempSync(join(tmpdir(), "pi-repl-nocfg-"));
-		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "", viewLines: 120 });
+		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "", viewLines: 120, cellMaxMb: 32 });
 	});
 
 	test("defaultOn and the drop list are read", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-repl-cfg-"));
 		writeFileSync(join(dir, "pi-repl.json"), JSON.stringify({ defaultOn: true, drop: ["sessions", "remote"] }));
-		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "", viewLines: 120 });
+		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, cellMaxMb: 32 });
 	});
 
 	test("a config file that exists but cannot be parsed is loud, and defaults apply", () => {
@@ -1185,7 +1204,7 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 
 	test("junk entries are ignored with a count, never silently", () => {
 		const warns: string[] = [];
-		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "", viewLines: 120 });
+		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, cellMaxMb: 32 });
 		expect(warns.join(" ")).toContain("ignored 2");
 		const warns2: string[] = [];
 		expect(parseReplConfig({ defaultOn: "yes", drop: "sessions" }, (m) => warns2.push(m))).toEqual(DEFAULT_REPL_CONFIG);

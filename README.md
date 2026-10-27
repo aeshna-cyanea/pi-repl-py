@@ -68,7 +68,8 @@ genuinely better route to the same job.
   "defaultOn": true,
   "drop": ["sessions", "remote"],
   "captureDir": "/tmp/pan-out",
-  "viewLines": 120
+  "viewLines": 120,
+  "cellMaxMb": 32
 }
 ```
 
@@ -77,7 +78,10 @@ genuinely better route to the same job.
 | `defaultOn` | start every session in the REPL. `--repl` and `/repl on` still work; `PI_REPL_FORCE=0` starts a stock session without editing files |
 | `drop` | extension tools the REPL should also collapse. A name that is not registered is a no-op; `execute` can never be dropped |
 | `captureDir` | where each cell's COMPLETE stdout+stderr is written (`<captureDir>/<session>/cell-<n>.txt`). `""` (the default) turns the tee off: output is capped and the withheld text is gone. It is opt-in because it is a decision about this box's disk — on Linux the usual tier is tmpfs, i.e. RAM |
-| `viewLines` | how many lines of a cell's stream I am shown before the marker points at the complete copy. One knob for two layers: the engine bounds its view at this and the kernel is told the same number, so the view verbs agree on what a page is |
+| `viewLines` | how many lines of a cell's stream I am shown before the marker points at the complete copy. One knob for two layers: the engine bounds its view at this and the kernel is told the same number (`PAN_VIEW_LINES`), so the view verbs agree on what a page is |
+| `cellMaxMb` | how many megabytes one cell's tee file may hold (default 32). It stops one runaway loop owning the tier, and the copy says so inside itself when it was cut. The tier as a whole is bounded by panlib (`hotCapMb`/`archiveCapMb` in the same file), not here |
+
+A path written by hand may start with `~`: `captureDir` is expanded against this user's home at parse time, because the bridge `mkdir`s the value verbatim and an unexpanded `~/x` would become a directory literally named `~` and read exactly like a tee that works.
 
 Precedence at startup: `PI_REPL_FORCE=1` on, `PI_REPL_FORCE=0` off, then `--repl`, then
 `defaultOn`. `/repl on` / `/repl off` overrides everything for the rest of the session. A file that

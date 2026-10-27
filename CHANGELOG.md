@@ -25,6 +25,13 @@
   tee is bounded per cell (`PI_REPL_CAPTURE_MAX_BYTES`) with the cut written into the copy and repeated
   in the marker; and the bridge reports at boot whether the tee will actually write, which `repl status`
   shows next to what `pi-repl.json` asked for, since a wish and a witness are different things.
+  Three boundary fixes came out of using it the same day: the per-cell bound is a config key
+  (`cellMaxMb`, default 32) and not only an env default; a hand-written `~` in `captureDir` resolves
+  against home instead of making a directory literally named `~`; and the view knob reaches the kernel
+  as one exported constant (`VIEW_LINES_ENV` = `PAN_VIEW_LINES`) — for a day the fork handed over
+  `PI_REPL_VIEW_LINES` while panlib read `PAN_VIEW_LINES`, and BOTH suites stayed green because a
+  boundary cannot be pinned from inside either side, so the new unit tests read panlib's source to
+  keep the names equal.
 
 ### Changed
 
