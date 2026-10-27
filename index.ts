@@ -225,7 +225,7 @@ export default function (pi: ExtensionAPI) {
 					// the capture knobs, from pi-repl.json: an empty captureDir stays ABSENT, because a
 					// half-set knob reads exactly like a tee that works
 					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
-					PI_REPL_VIEW_LINES: String(config.viewLines),
+					PAN_VIEW_LINES: String(config.viewLines),
 				},
 				// --- snapshots are per-conversation; skipRestore marks the wedged-boot retry ---
 				snapshot,

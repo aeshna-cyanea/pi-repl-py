@@ -12,9 +12,23 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
 
 export const REPL_CONFIG_FILE = "pi-repl.json";
+
+/** One rule for a path a human writes by hand: a leading `~` means this user's home. It belongs at the
+ *  parse edge and nowhere else, because this value is handed to the bridge as `PI_REPL_CAPTURE_DIR` and the
+ *  bridge `mkdir`s it verbatim -- an unexpanded `~/x` becomes a directory literally named `~`, which reads
+ *  exactly like a tee that works. Measured 2026-10-27 on the python half of the same boundary, where
+ *  `panout._dir()` applies the same rule for the same reason. Only a leading `~` counts: a tilde in the
+ *  middle of a path is somebody's filename.
+ */
+export function expandHome(path: string): string {
+	if (path === "~") return homedir();
+	if (path.startsWith(`~${sep}`)) return join(homedir(), path.slice(2));
+	return path;
+}
 
 export interface ReplConfig {
 	/** Start every session in repl mode. `/repl off` and PI_REPL_FORCE=0 still win per session. */
@@ -64,7 +78,7 @@ export function parseReplConfig(raw: unknown, warn: (message: string) => void = 
 		} else warn(`[pi-repl] config drop must be a list of tool names, got ${typeof record.drop}; ignoring`);
 	}
 	if (record.captureDir !== undefined) {
-		if (typeof record.captureDir === "string") next.captureDir = record.captureDir;
+		if (typeof record.captureDir === "string") next.captureDir = expandHome(record.captureDir);
 		else warn(`[pi-repl] config captureDir must be a path or "", got ${typeof record.captureDir}; ignoring`);
 	}
 	if (record.viewLines !== undefined) {

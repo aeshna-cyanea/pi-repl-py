@@ -871,7 +871,7 @@ create: () =>
 		test("a cell over the view budget: the file holds every line and the view names the file", { timeout: 60_000 }, async () => {
 			const d = tempDir();
 			const capDir = tempDir();
-			const m = engine({ cwd: d, env: teeEnv(capDir, { PI_REPL_VIEW_LINES: "20" }) });
+			const m = engine({ cwd: d, env: teeEnv(capDir, { PAN_VIEW_LINES: "20" }) });
 
 			// a silent cell gets no file, and neither does any housekeeping op (names, snapshot): the tee
 			// buckets only what `emit_stream` carried, so a tier of empty files never accumulates
@@ -904,7 +904,7 @@ create: () =>
 
 		test("no capture dir means no pointer and the old cap byte for byte, with no path invented", { timeout: 60_000 }, async () => {
 			const d = tempDir();
-			const m = engine({ cwd: d, env: { PAN_SESSION_STEM: STEM, PI_REPL_VIEW_LINES: "20" } });
+			const m = engine({ cwd: d, env: { PAN_SESSION_STEM: STEM, PAN_VIEW_LINES: "20" } });
 			const r = await m.execute("for i in range(500): print(f'line {i}')");
 			expect(r.capture).toBeUndefined();
 			expect(r.stdout).toContain("line 499"); // nothing was withheld: the negative control
@@ -969,7 +969,7 @@ create: () =>
 			const d = tempDir();
 			const capDir = tempDir();
 			const MAX = "2000";
-			const m = engine({ cwd: d, env: teeEnv(capDir, { PI_REPL_CAPTURE_MAX_BYTES: MAX, PI_REPL_VIEW_LINES: "10" }) });
+			const m = engine({ cwd: d, env: teeEnv(capDir, { PI_REPL_CAPTURE_MAX_BYTES: MAX, PAN_VIEW_LINES: "10" }) });
 			// the knob has to reach the bridge process, and the kernel inherits that env: if this reads
 			// None the tee is silently running at 32 MiB and the rest of the test would prove nothing
 			const probe = await m.execute("import os\nprint(os.environ.get('PI_REPL_CAPTURE_MAX_BYTES'))");

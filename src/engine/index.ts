@@ -34,10 +34,18 @@ export const DEFAULT_MAX_RESULT_CHARS = 4000;
 /** The view bound: how many lines of a cell's stream I am shown before the marker points at the
  *  complete copy. Measured 2026-10-27 across 25,413 tool results in 83 session trees: p90 = 62 lines,
  *  p95 = 92, p99 = 245, max 1,789 -- so 120 clips 3.4% of results and leaves 96.6% whole. It is ONE
- *  knob for the whole stack: `viewLines` in pi-repl.json arrives here as PI_REPL_VIEW_LINES, and the
+ *  knob for the whole stack: `viewLines` in pi-repl.json arrives here as PAN_VIEW_LINES, and the
  *  same value is handed to the kernel so panlib's own view verbs (peek/show/cap/run) default to it.
  *  "How much a cell shows me" is then configured in exactly one place. */
 export const DEFAULT_OUTPUT_VIEW_LINES = 120;
+/** The ONE name for that knob, on both sides of the process boundary. The extension hands this env var
+ *  to the kernel and the engine reads it back; panlib reads the same string as `panout.VIEW_ENV`. It was
+ *  two strings for a day (`PI_REPL_VIEW_LINES` here, `PAN_VIEW_LINES` there) and neither side noticed --
+ *  each read its own name and saw a plausible default, which is what a wrong page size looks like. A name
+ *  that crosses a boundary belongs in a constant, and my repo has a test that reads this file to keep the
+ *  two equal.
+ */
+export const VIEW_LINES_ENV = "PAN_VIEW_LINES";
 const ABORT_GRACE_MS = 20_000;
 /** Shared deadline: bounds a wedged boot (lifecycle) and a wedged background restore alike. */
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
@@ -415,9 +423,9 @@ export class EngineManager {
 
 			const started = Date.now();
 			const maxChars = opts.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
-			// One knob for the whole stack: pi-repl.json `viewLines` reaches here as PI_REPL_VIEW_LINES,
+			// One knob for the whole stack: pi-repl.json `viewLines` reaches here as VIEW_LINES_ENV,
 			// and the same value is handed to the kernel for panlib's own view verbs.
-			const viewCfg = Number(process.env.PI_REPL_VIEW_LINES ?? this.options.env?.PI_REPL_VIEW_LINES ?? DEFAULT_OUTPUT_VIEW_LINES);
+			const viewCfg = Number(process.env[VIEW_LINES_ENV] ?? this.options.env?.[VIEW_LINES_ENV] ?? DEFAULT_OUTPUT_VIEW_LINES);
 			const viewLines = opts.viewLines ?? (Number.isFinite(viewCfg) && viewCfg > 0 ? viewCfg : DEFAULT_OUTPUT_VIEW_LINES);
 			let aborted = false;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;

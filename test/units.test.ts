@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resolveHelperDirs } from "../src/engine/helpers-locate.js";
 import type { RestoreResult } from "../src/engine/index.js";
@@ -24,6 +24,7 @@ import {
 	MAX_OUTPUT_LINE_CHARS,
 	pruneOrphanedSnapshotDirs,
 	pruneSnapshotDirs,
+	VIEW_LINES_ENV,
 } from "../src/engine/index.js";
 import { type CellResult, DEFAULT_BOOTSTRAP, KernelClient } from "../src/engine/kernel.js";
 import {
@@ -1005,6 +1006,41 @@ describe("stream view bound", () => {
 });
 
 describe("pi-repl.json config", () => {
+	// the value goes to the bridge as PI_REPL_CAPTURE_DIR and the bridge mkdir's it verbatim, so an
+	// unexpanded "~/pan-out" creates a directory literally named "~" and reads exactly like a tee that
+	// works. panlib applies the same rule on its half of the boundary (`panout._dir`), same reason.
+	test("a captureDir written with a leading ~ resolves to home, never to a directory named ~", () => {
+		const home = homedir();
+		const none = () => {};
+		expect(parseReplConfig({ captureDir: "~/pan-out" }, none).captureDir).toBe(join(home, "pan-out"));
+		expect(parseReplConfig({ captureDir: "~" }, none).captureDir).toBe(home);
+		expect(parseReplConfig({ captureDir: "/tmp/pan-out" }, none).captureDir).toBe("/tmp/pan-out");
+		expect(parseReplConfig({ captureDir: "a/~/b" }, none).captureDir).toBe("a/~/b");
+	});
+
+	// Pinned from the other side on purpose. For a day the fork handed the kernel PI_REPL_VIEW_LINES while
+	// panlib's `panout.VIEW_ENV` was PAN_VIEW_LINES: each repo read its own name, saw a plausible default,
+	// and both suites stayed green while the page size was 60 in one layer and 120 in the other. A name
+	// that crosses a process boundary cannot be pinned from inside either repo alone.
+	test("the view knob crosses the kernel boundary as one constant, and panlib reads that same name", () => {
+		expect(VIEW_LINES_ENV).toBe("PAN_VIEW_LINES");
+		const src = readFileSync(join(import.meta.dir, "..", "src", "engine", "index.ts"), "utf8");
+		expect(src).toContain("process.env[VIEW_LINES_ENV]"); // the constant is used, not just exported
+		// The pin is on the *read shape*, not on the string: the docstring above that constant tells the story
+		// of the drift, and prose is not a read. A whole-file negative assertion is defeated by its own comment.
+		expect(src).not.toMatch(/(?:process\.env|env\?\.)\.PI_REPL_VIEW_LINES\b/);
+	});
+
+	const panlibPanout = join(homedir(), ".pi", "pan", "lib", "panlib", "output", "panout.py");
+	(existsSync(panlibPanout) ? test : test.skip)(
+		"panlib declares the env name the fork hands over, not a look-alike of it",
+		() => {
+			const m = /\bVIEW_ENV\s*=\s*"([A-Z0-9_]+)"/.exec(readFileSync(panlibPanout, "utf8"));
+			expect(m).not.toBeNull();
+			expect(m![1]).toBe(VIEW_LINES_ENV);
+		},
+	);
+
 	test("captureDir and viewLines are read, and junk is reported rather than obeyed", () => {
 		const warns: string[] = [];
 		const cfg = parseReplConfig({ captureDir: "/tmp/pan-out", viewLines: 60 }, (m) => warns.push(m));
