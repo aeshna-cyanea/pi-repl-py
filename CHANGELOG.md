@@ -31,7 +31,10 @@
   as one exported constant (`VIEW_LINES_ENV` = `PAN_VIEW_LINES`) — for a day the fork handed over
   `PI_REPL_VIEW_LINES` while panlib read `PAN_VIEW_LINES`, and BOTH suites stayed green because a
   boundary cannot be pinned from inside either side, so the new unit tests read panlib's source to
-  keep the names equal.
+  keep the names equal. The entry point now hands that name over as the constant rather than as a second
+  typed copy of it: the drift *was* a copy, and `index.ts` was still holding one (`grep -c VIEW_LINES_ENV
+  index.ts` = 0), which is the one file where a copy is what gets handed to the kernel. panlib's own test
+  suite is what found it — `test_panout.py` reads this repo's source to pin the wiring lines.
 
 ### Changed
 

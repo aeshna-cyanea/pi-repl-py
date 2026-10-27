@@ -1056,7 +1056,7 @@ describe("pi-repl.json config", () => {
 		// should be exactly that — deliberate.
 		const ext = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf8");
 		expect(ext).toContain("PI_REPL_CAPTURE_MAX_BYTES: String(config.cellMaxMb * 1024 * 1024)");
-		expect(ext).toContain("PAN_VIEW_LINES: String(config.viewLines)");
+		expect(ext).toContain("[VIEW_LINES_ENV]: String(config.viewLines)");
 		expect(ext).toContain("PI_REPL_CAPTURE_DIR: config.captureDir");
 	});
 

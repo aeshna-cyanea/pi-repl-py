@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { EngineManager, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
+import { EngineManager, VIEW_LINES_ENV, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
 import {
 	type HelperEntry,
 	formatDivergenceNote,
@@ -225,7 +225,7 @@ export default function (pi: ExtensionAPI) {
 					// the capture knobs, from pi-repl.json: an empty captureDir stays ABSENT, because a
 					// half-set knob reads exactly like a tee that works
 					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
-					PAN_VIEW_LINES: String(config.viewLines),
+					[VIEW_LINES_ENV]: String(config.viewLines),
 					PI_REPL_CAPTURE_MAX_BYTES: String(config.cellMaxMb * 1024 * 1024),
 				},
 				// --- snapshots are per-conversation; skipRestore marks the wedged-boot retry ---
