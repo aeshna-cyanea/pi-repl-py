@@ -220,7 +220,13 @@ export default function (pi: ExtensionAPI) {
 				// than fall back to a newest-jsonl-by-mtime guess, which is the guess that named the wrong session
 				// on 2026-10-13. The stem is the same string the snapshot dir is keyed by (conversationName), so
 				// pan/logs/keep/<stem>/ and this conversation's state dir are visibly one session.
-				env: sessionFile ? { PAN_SESSION_STEM: conversationName(sessionFile) } : undefined,
+				env: {
+					...(sessionFile ? { PAN_SESSION_STEM: conversationName(sessionFile) } : {}),
+					// the capture knobs, from pi-repl.json: an empty captureDir stays ABSENT, because a
+					// half-set knob reads exactly like a tee that works
+					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
+					PI_REPL_VIEW_LINES: String(config.viewLines),
+				},
 				// --- snapshots are per-conversation; skipRestore marks the wedged-boot retry ---
 				snapshot,
 				skipRestore,
@@ -376,7 +382,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
 		name: "execute",
 		label: "execute",
-		description: executeToolDescription,
+		description: executeToolDescription(
+				config.captureDir ? { dir: config.captureDir, viewLines: config.viewLines } : undefined,
+			),
 		promptSnippet: executePromptSnippet,
 		promptGuidelines: buildPromptGuidelines(),
 		parameters: executeSchema,
@@ -522,6 +530,7 @@ export default function (pi: ExtensionAPI) {
 						names,
 					},
 					snapshot,
+					capture: { configuredDir: config.captureDir, viewLines: config.viewLines, boot: m?.captureBoot() },
 					helpers: {
 						files: disk,
 						advertised: adv.map((entry) => ({ name: entry.name, chars: formatHelperLine(entry).length })),

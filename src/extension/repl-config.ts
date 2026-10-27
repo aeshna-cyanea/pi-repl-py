@@ -26,9 +26,23 @@ export interface ReplConfig {
 	 * and `remote` (subprocess.run with an argv list). A name that is not registered is a no-op.
 	 */
 	drop: string[];
+	/**
+	 * Where a cell's COMPLETE stdout+stderr is written: `<captureDir>/<session stem>/cell-<n>.txt`.
+	 * Empty (the default) means the tee is off: the engine caps output and says there is no copy. It is
+	 * opt-in because writing every cell's stream is a decision about this box's disk -- on bagheera the
+	 * hot tier is tmpfs, i.e. RAM, and a retention policy already lives next to it in panlib.
+	 */
+	captureDir: string;
+	/**
+	 * How many lines of a cell's stream I am shown before the marker points at the complete copy.
+	 * ONE knob for two layers: the engine trims at this, and the same number is handed to the kernel as
+	 * PAN_VIEW_LINES so panlib's own view verbs (peek/show/cap/run) default to it. Measured 2026-10-27:
+	 * 120 clips 3.4% of results, 60 clips 10.6%.
+	 */
+	viewLines: number;
 }
 
-export const DEFAULT_REPL_CONFIG: ReplConfig = { defaultOn: false, drop: [] };
+export const DEFAULT_REPL_CONFIG: ReplConfig = { defaultOn: false, drop: [], captureDir: "", viewLines: 120 };
 
 /** Tolerant of junk, never throws, and says what it discarded. */
 export function parseReplConfig(raw: unknown, warn: (message: string) => void = console.warn): ReplConfig {
@@ -48,6 +62,15 @@ export function parseReplConfig(raw: unknown, warn: (message: string) => void = 
 			if (kept.length !== record.drop.length) warn(`[pi-repl] config drop: ignored ${record.drop.length - kept.length} non-string entries`);
 			next.drop = kept;
 		} else warn(`[pi-repl] config drop must be a list of tool names, got ${typeof record.drop}; ignoring`);
+	}
+	if (record.captureDir !== undefined) {
+		if (typeof record.captureDir === "string") next.captureDir = record.captureDir;
+		else warn(`[pi-repl] config captureDir must be a path or "", got ${typeof record.captureDir}; ignoring`);
+	}
+	if (record.viewLines !== undefined) {
+		const n = Number(record.viewLines);
+		if (Number.isInteger(n) && n > 0) next.viewLines = n;
+		else warn(`[pi-repl] config viewLines must be a positive integer, got ${String(record.viewLines)}; ignoring`);
 	}
 	return next;
 }

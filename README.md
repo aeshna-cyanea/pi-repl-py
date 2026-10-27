@@ -66,7 +66,9 @@ genuinely better route to the same job.
 ```json
 {
   "defaultOn": true,
-  "drop": ["sessions", "remote"]
+  "drop": ["sessions", "remote"],
+  "captureDir": "/tmp/pan-out",
+  "viewLines": 120
 }
 ```
 
@@ -74,6 +76,8 @@ genuinely better route to the same job.
 |---|---|
 | `defaultOn` | start every session in the REPL. `--repl` and `/repl on` still work; `PI_REPL_FORCE=0` starts a stock session without editing files |
 | `drop` | extension tools the REPL should also collapse. A name that is not registered is a no-op; `execute` can never be dropped |
+| `captureDir` | where each cell's COMPLETE stdout+stderr is written (`<captureDir>/<session>/cell-<n>.txt`). `""` (the default) turns the tee off: output is capped and the withheld text is gone. It is opt-in because it is a decision about this box's disk — on Linux the usual tier is tmpfs, i.e. RAM |
+| `viewLines` | how many lines of a cell's stream I am shown before the marker points at the complete copy. One knob for two layers: the engine bounds its view at this and the kernel is told the same number, so the view verbs agree on what a page is |
 
 Precedence at startup: `PI_REPL_FORCE=1` on, `PI_REPL_FORCE=0` off, then `--repl`, then
 `defaultOn`. `/repl on` / `/repl off` overrides everything for the rest of the session. A file that

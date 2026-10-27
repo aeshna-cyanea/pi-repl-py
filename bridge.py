@@ -12,7 +12,7 @@ Protocol (JSON lines; host -> bridge on stdin, bridge -> host on stdout):
   out: {"type":"ready","helpers":[{"name":str,"ok":bool,"error":str?}]}      kernel up, helpers loaded
        {"type":"stream","id":str,"name":"stdout"|"stderr","text":str}        cell output, streamed
        {"type":"result","id":str,"status":"ok"|"error"|"aborted",            cell settled
-              "result":str?,"error":{...}?,"card":obj?}
+              "result":str?,"error":{...}?,"card":obj?,"capture":obj?}
 
 The `card` is a display side-channel (Key 138): a kernel function — patch() today — that wants the
 human to see its artifact as something other than a text blob publishes one JSON object on the kernel's
@@ -50,6 +50,54 @@ NAMES_MIME = "application/vnd.pi-repl.names+json"
 SURFACE_MIME = "application/vnd.pi-repl.surface+json"
 CARD_MIME = "application/vnd.pi-repl.card+json"
 READY_TIMEOUT_MS = 30_000
+
+# --- the cell stream tee: where the COMPLETE stdout+stderr of a cell goes, before any cap. -----------
+# PI_REPL_CAPTURE_DIR unset = the tee is off: the engine keeps its old channel cap and says the copy is
+# missing. A config choice rather than a default, because writing every cell's output is a decision about
+# this box's disk, not universal behaviour.
+CAPTURE_ENV = "PI_REPL_CAPTURE_DIR"
+CAPTURE_MAX_ENV = "PI_REPL_CAPTURE_MAX_BYTES"
+CAPTURE_MAX_DEFAULT = 32 * 1024 * 1024
+# The session a capture belongs to is TOLD, never guessed: the host passes PAN_SESSION_STEM at spawn
+# (index.ts create()), and a capture filed under a guessed session is a pointer that can lie.
+STEM_ENV = "PAN_SESSION_STEM"
+
+
+def capture_boot_state():
+    """What the tee will actually do, said once at boot where the bridge is reported.
+
+    The reason this is reported and not merely read: a knob that silently never writes is a knob that is
+    off, and a component that is off without saying so reads exactly like a component that is working.
+    """
+    root = os.environ.get(CAPTURE_ENV)
+    if not root:
+        return {"on": False, "reason": "%s is unset: cell streams are capped, not copied" % CAPTURE_ENV}
+    if not os.environ.get(STEM_ENV):
+        return {"on": False, "reason": "%s is unset: the bridge will not guess which session owns a capture" % STEM_ENV}
+    return {"on": True, "dir": root, "max_bytes": int(os.environ.get(CAPTURE_MAX_ENV) or CAPTURE_MAX_DEFAULT)}
+
+
+def tee_add(cap, name, text, max_bytes):
+    """Add one stream frame to the tee, honouring the byte bound inside a frame, not just between them.
+
+    The bound is counted in BYTES because the tier it protects is disk (tmpfs on this box, i.e. RAM).
+    A frame is sliced rather than skipped: ipykernel can deliver a whole cell in one frame, so a check
+    written as `if bytes_so_far < max` lets a 20 KB frame past a 2 KB bound and never notices the
+    overshoot. The slice is decoded with "ignore" so a cut never ends on a broken codepoint, and the cut
+    is recorded in the file itself (`_write_capture`) rather than being a fact only this loop knows.
+    """
+    room = max_bytes - cap["bytes"]
+    if room <= 0:
+        cap["cut"] = True
+        return
+    raw = text.encode("utf-8", "replace")
+    if len(raw) > room:
+        cap[name].append(raw[:room].decode("utf-8", "ignore"))
+        cap["bytes"] += room
+        cap["cut"] = True
+    else:
+        cap[name].append(text)
+        cap["bytes"] += len(raw)
 
 # --- cell history: ON, and that is a decision with a history of its own. ---------------
 # 0.6.12 turned store_history off because IPython was pinning result objects and a long
@@ -273,6 +321,9 @@ class Bridge:
         payload = None
         card = None
         quiet_for = 0.0
+        # the tee: every stream frame of this cell, bucketed per channel, before any host cap exists
+        cap = {"stdout": [], "stderr": [], "bytes": 0, "cut": False}
+        exec_n = None
         try:
             while True:
                 # pending interrupts/shutdowns act within one poll cadence
@@ -293,9 +344,15 @@ class Bridge:
                 quiet_for = 0.0
                 ctype = msg["msg_type"]
                 content = msg["content"]
-                if ctype == "stream":
+                if ctype == "execute_input":
+                    # the cell's own number: also its history row and its capture file name
+                    exec_n = content.get("execution_count")
+                elif ctype == "stream":
+                    name = "stderr" if content.get("name") == "stderr" else "stdout"
+                    text = content.get("text") or ""
                     if emit_stream:
-                        self.emit({"type": "stream", "id": emit_id or msg_id, "name": "stderr" if content.get("name") == "stderr" else "stdout", "text": content.get("text") or ""})
+                        tee_add(cap, name, text, self.capture_max)
+                        self.emit({"type": "stream", "id": emit_id or msg_id, "name": name, "text": text})
                 elif ctype == "execute_result":
                     data = content.get("data") or {}
                     if "text/plain" in data:
@@ -343,7 +400,9 @@ class Bridge:
             error = {"name": "KeyboardInterrupt", "message": "cell interrupted", "stack": []}
         self.op_id = None
         self.op_payload_mime = None
-        return {"status": status, "result": result, "error": error, "payload": payload, "card": card}
+        capture = self._write_capture(exec_n, cap) if emit_stream else None
+        return {"status": status, "result": result, "error": error, "payload": payload, "card": card,
+                "capture": capture}
 
     def _take_payload(self, content):
         data = content.get("data") or {}
@@ -384,6 +443,8 @@ class Bridge:
 
     FORCED_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024
     QUIET_WINDOW_S = 0.15
+    # One cell's tee is bounded so a runaway loop cannot own the tier; the cut is recorded, not hidden.
+    capture_max = int(os.environ.get(CAPTURE_MAX_ENV) or CAPTURE_MAX_DEFAULT)
 
     def _names(self):
         res = self.run_cell(names_code(self.helper_names), emit_stream=False, payload_mime=NAMES_MIME)
@@ -496,7 +557,9 @@ class Bridge:
                 err = res["error"] or {}
                 report.append({"name": h["name"], "ok": False,
                                "error": (err.get("name") + ": " + err.get("message", "")).strip() or "failed to load"})
-        self.emit({"type": "ready", "helpers": report, "bootstrap": bres})
+        # the capture verdict at boot, so a mis-set knob is visible where the bridge is reported rather
+        # than being a tee that quietly never writes -- and an off component reads exactly like a working one
+        self.emit({"type": "ready", "helpers": report, "bootstrap": bres, "capture": capture_boot_state()})
 
     def op_exec(self, op):
         res = self.run_cell(op["code"], emit_stream=True, emit_id=op["id"])
@@ -507,7 +570,66 @@ class Bridge:
             out["error"] = res["error"]
         if res.get("card") is not None:
             out["card"] = res["card"]
+        if res.get("capture") is not None:
+            # the host shows a bounded view only because this pointer exists; see _write_capture
+            out["capture"] = res["capture"]
         self.emit(out)
+
+    def _write_capture(self, n, cap):
+        """Write one cell's COMPLETE stdout+stderr, and return the pointer the engine aims its view at.
+
+        Why HERE, and not closer to the kernel: ipykernel owns the fd level. `iostream.py:558-571`
+        (`_setup_stream_redirects`, Linux + watchfd) dup2s a pipe over the real fd 1/2 and a watcher
+        thread republishes whatever lands there, so by the time a `stream` frame reaches this loop it has
+        already gathered every route output can take: my own print, a C-level write, and a child that
+        inherited fd 1 -- `subprocess.run(cmd)` with no `capture_output`, whose text exists nowhere in the
+        kernel's memory and still reaches me. A proxy inside the kernel would sit *above* fd 1 and miss
+        that route; the TS host sits *past* the cap and has already dropped the bytes. This loop is the
+        one place the whole cell exists, and the copy is what earns the engine's right to show me less.
+
+        Named by the kernel's own number, so the copy joins cell history on the key both sides have:
+        `In[<n>]` and `cell-<n>.txt` are the same cell. `execute_input` publishes that number for every
+        non-silent request (`kernelbase.py:867-869`), so there is nothing to guess; and if no number
+        arrived, there is no file either.
+
+        Bounded on purpose: `PI_REPL_CAPTURE_MAX_BYTES` stops the tee from letting one runaway loop own
+        the tier (this box's hot tier is tmpfs -- RAM). The cut is written INTO the file and reported, so
+        a truncated copy says so at the point of reading instead of looking complete.
+        """
+        root = os.environ.get(CAPTURE_ENV)
+        if not root:
+            return None
+        stem = os.environ.get(STEM_ENV)
+        if not stem:
+            # told, never guessed: a capture filed under a guessed session is a pointer that can lie
+            return {"reason": "%s is unset, so there is no session to file this capture in" % STEM_ENV}
+        if not isinstance(n, int):
+            return {"reason": "no execute_input for this cell: nothing to name the capture by"}
+        parts, stats = [], {}
+        for name in ("stdout", "stderr"):
+            text = "".join(cap[name])
+            if not text:
+                continue
+            stats[name] = {"lines": len(text.splitlines()), "bytes": len(text.encode("utf-8", "replace"))}
+            parts.append(text if name == "stdout" else "[stderr]\n" + text)
+        if not parts:
+            return None                     # a silent cell gets no file and no pointer
+        if cap["cut"]:
+            note = ("[... the capture stopped at %d bytes (%s); everything after that was never "
+                    "written ...]" % (self.capture_max, CAPTURE_MAX_ENV))
+            parts.append(note)
+            # only the channels the tee actually holds: a cut does not invent a channel that never spoke
+            for ch in list(stats):
+                stats[ch]["cut"] = True
+        d = os.path.join(root, stem)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        path = os.path.join(d, "cell-%06d.txt" % n)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(parts))
+        os.replace(tmp, path)                # atomic: a crash cannot leave a half copy that reads whole
+        stats["path"] = path
+        return stats
 
     def _write_snapshot(self, path, max_bytes, names=None):
         import cloudpickle  # noqa: F401 — fail loudly here, not at bridge boot

@@ -14,10 +14,12 @@ import { resolveHelperDirs } from "../src/engine/helpers-locate.js";
 import type { RestoreResult } from "../src/engine/index.js";
 import {
 	boundResult,
+	boundView,
 	capLinesForContext,
 	DEFAULT_MAX_OUTPUT_CHARS,
 	DEFAULT_MAX_RESULT_CHARS,
 	DEFAULT_MAX_RESULT_LINES,
+	DEFAULT_OUTPUT_VIEW_LINES,
 	EngineManager,
 	MAX_OUTPUT_LINE_CHARS,
 	pruneOrphanedSnapshotDirs,
@@ -35,7 +37,7 @@ import {
 	SURFACE_QUERY_MARKER,
 	formatDivergenceNote,
 } from "../src/extension/helpers.js";
-import { buildPromptGuidelines } from "../src/extension/prompt.js";
+import { buildPromptGuidelines, executeToolDescription } from "../src/extension/prompt.js";
 import {
 	backgroundFor,
 	closeOpenSgr,
@@ -942,6 +944,85 @@ describe("cell result bound", () => {
 	});
 });
 
+describe("stream view bound", () => {
+	// The rule this pins: a bounded view is only honest when a pointer at the whole thing exists.
+	const many = (n: number) => Array.from({ length: n }, (_, i) => `line ${i} of a deliberately long value`).join("\n");
+
+	test("a stream inside the view budget passes through and claims no copy", () => {
+		const r = boundView("one\ntwo\nthree", 120, "/tmp/cell-000007.txt");
+		expect(r.trimmed).toBe(false);
+		expect(r.text).toBe("one\ntwo\nthree");
+		expect(r.text).not.toContain("full text:");
+	});
+
+	test("over the budget the marker names the copy, and the hint omits n because peek has a default", () => {
+		const r = boundView(many(400), 120, "/tmp/pan-out/stem/cell-000007.txt");
+		expect(r.trimmed).toBe(true);
+		expect(r.text.split("\n").length).toBe(122); // 120 lines + marker + peek hint
+		expect(r.text).toContain("full text: /tmp/pan-out/stem/cell-000007.txt]");
+		expect(r.text).toContain("peek('/tmp/pan-out/stem/cell-000007.txt', start=121)");
+		expect(r.text).not.toContain("start=121, n=");
+	});
+
+	test("the totals come from the tee, not from the head that survived", () => {
+		// a truncated head arriving from a mismatched bridge must not make the marker understate the cell
+		const r = boundView(many(150), 120, "/x/cell-000009.txt", { lines: 900, bytes: 123456 });
+		expect(r.text).toContain("900 lines, 123456 chars");
+		expect(r.lines).toBe(900);
+	});
+
+	test("with no capture the marker refuses to invent a path", () => {
+		const r = boundView(many(400), 120);
+		expect(r.trimmed).toBe(true);
+		expect(r.text).toContain("PI_REPL_CAPTURE_DIR is unset");
+		expect(r.text).not.toContain("full text:");
+	});
+
+	test("the char bound keeps one giant line inside the channel budget", () => {
+		const r = boundView(`${"x".repeat(200_000)}\n${many(400)}`, 120, "/x/cell-000011.txt", undefined, DEFAULT_MAX_OUTPUT_CHARS);
+		expect(r.text.length).toBeLessThanOrEqual(DEFAULT_MAX_OUTPUT_CHARS);
+		expect(r.cutByChars).toBe(true);
+	});
+
+	test("the default view budget is the measured one, and changing it is a decision", () => {
+		// 120 is not a taste: 25,413 tool results measured p90 62 / p95 92 / p99 245 lines. A test that
+		// passes an explicit budget cannot catch the default drifting, so this one does not.
+		expect(DEFAULT_OUTPUT_VIEW_LINES).toBe(120);
+		const r = boundView(many(400), undefined, "/x/cell-000013.txt");
+		expect(r.shownLines).toBe(DEFAULT_OUTPUT_VIEW_LINES);
+		expect(r.trimmed).toBe(true);
+	});
+
+	test("when the copy itself hit its byte bound, the marker says the totals are not the cell's", () => {
+		// the tee caps one cell so a runaway loop cannot own the tier; the numbers it reports are then what
+		// it HELD, and a marker that states them as the cell's total is the lie this channel exists to avoid
+		const r = boundView(many(400), 120, "/x/cell-000014.txt", { lines: 400, bytes: 2048, cut: true });
+		expect(r.text).toContain("full text: /x/cell-000014.txt]");
+		expect(r.text).toContain("note: the copy hit its own byte bound");
+		const clean = boundView(many(400), 120, "/x/cell-000015.txt", { lines: 400, bytes: 999_999 });
+		expect(clean.text).not.toContain("byte bound");
+	});
+});
+
+describe("pi-repl.json config", () => {
+	test("captureDir and viewLines are read, and junk is reported rather than obeyed", () => {
+		const warns: string[] = [];
+		const cfg = parseReplConfig({ captureDir: "/tmp/pan-out", viewLines: 60 }, (m) => warns.push(m));
+		expect(cfg.captureDir).toBe("/tmp/pan-out");
+		expect(cfg.viewLines).toBe(60);
+		const bad = parseReplConfig({ captureDir: 7, viewLines: "many" }, (m) => warns.push(m));
+		expect(bad.captureDir).toBe("");
+		expect(bad.viewLines).toBe(120);
+		expect(warns.length).toBe(2);
+	});
+
+	test("an unset captureDir means the tee is off, which is the default", () => {
+		const cfg = parseReplConfig({}, () => {});
+		expect(cfg.captureDir).toBe("");
+		expect(DEFAULT_REPL_CONFIG.captureDir).toBe("");
+	});
+});
+
 describe("/repl toggle", () => {
 	test("parses on/off, case-insensitive, whitespace-tolerant", () => {
 		expect(parseReplToggle("on")).toBe("on");
@@ -1045,14 +1126,16 @@ describe("repl tool surface: prune Pi's built-ins, never another extension's too
 
 describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 	test("a box with no config file gets the defaults", () => {
+		// Whole-object pins on purpose: a new config field has to earn its default here, in the open.
+		// captureDir "" means the tee is off; viewLines 120 is the measured view budget.
 		const missing = mkdtempSync(join(tmpdir(), "pi-repl-nocfg-"));
-		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [] });
+		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "", viewLines: 120 });
 	});
 
 	test("defaultOn and the drop list are read", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-repl-cfg-"));
 		writeFileSync(join(dir, "pi-repl.json"), JSON.stringify({ defaultOn: true, drop: ["sessions", "remote"] }));
-		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"] });
+		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "", viewLines: 120 });
 	});
 
 	test("a config file that exists but cannot be parsed is loud, and defaults apply", () => {
@@ -1066,7 +1149,7 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 
 	test("junk entries are ignored with a count, never silently", () => {
 		const warns: string[] = [];
-		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"] });
+		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "", viewLines: 120 });
 		expect(warns.join(" ")).toContain("ignored 2");
 		const warns2: string[] = [];
 		expect(parseReplConfig({ defaultOn: "yes", drop: "sessions" }, (m) => warns2.push(m))).toEqual(DEFAULT_REPL_CONFIG);
@@ -1081,6 +1164,27 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 		expect(startEngaged({ flagOn: false, defaultOn: false })).toBe(false);
 		// any other value of the escape hatch is not a force
 		expect(startEngaged({ flagOn: false, force: "yes", defaultOn: true })).toBe(true);
+	});
+});
+
+describe("the execute tool description states the output contract", () => {
+	test("with no tee it says truncated and names the char bound, because nothing is left to read", () => {
+		const d = executeToolDescription();
+		expect(d).toContain(`truncated to ${DEFAULT_MAX_OUTPUT_CHARS} chars`);
+		expect(d).not.toContain("cell-<n>.txt");
+	});
+
+	test("with a tee it says bounded, names the line bound, and says where the whole cell lives", () => {
+		const d = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120 });
+		expect(d).toContain("bounded to 120 lines");
+		expect(d).toContain("/tmp/pan-out/<session>/cell-<n>.txt");
+		expect(d).not.toContain("truncated to");
+	});
+
+	test("both modes open with the same namespace sentence: that part is not a tee detail", () => {
+		const head = "in one cell stay available to every later cell.";
+		expect(executeToolDescription()).toContain(head);
+		expect(executeToolDescription({ dir: "/x", viewLines: 1 })).toContain(head);
 	});
 });
 
@@ -2068,6 +2172,7 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 		replMode: true,
 		engine: { running: true, forkInherited: false, restoreSkipped: false, hasSnapshotHistory: false, names: 12 },
 		snapshot: { path: "/tmp/state/ns.snapshot", exists: true, ageMs: 5_000, bytes: 1234 },
+		capture: { configuredDir: "", viewLines: 120 },
 		helpers: {
 			files: [
 				{ name: "capture", description: "cap()", path: "/h/capture.py", bytes: 3181, mtimeMs: Date.now() },
@@ -2111,6 +2216,31 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 		}));
 		expect(s).toContain("revive SKIPPED");
 		expect(s).toContain("this conversation has a saved past");
+	});
+
+	test("status names the cell stream tee, on or off, because an off tee reads like a working one", () => {
+		const on = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, boot: { on: true, dir: "/tmp/pan-out", max_bytes: 33554432 } } }));
+		expect(on).toContain("cell stream tee: ON");
+		expect(on).toContain("/tmp/pan-out");
+		expect(on).toContain("view bound 120 line(s)");
+		const off = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, boot: { on: false, reason: "PI_REPL_CAPTURE_DIR is unset: cell streams are capped, not copied" } } }));
+		expect(off).toContain("cell stream tee: OFF");
+		expect(off).toContain("capped, not copied");
+		// no kernel yet: the config is a wish, and status says it is unconfirmed rather than confirming it
+		const unbooted = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 60 } }));
+		expect(unbooted).toContain("pi-repl.json asks for /tmp/pan-out");
+		expect(unbooted).toContain("has not confirmed it");
+	});
+
+	test("status names the disagreement between the config and the bridge, in both directions", () => {
+		// the failure mode I set myself up to hit tonight: a knob in pi-repl.json that the bridge never got
+		const refused = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, boot: { on: false, reason: "PAN_SESSION_STEM is unset" } } }));
+		expect(refused).toContain("cell stream tee: OFF");
+		expect(refused).toContain("PAN_SESSION_STEM is unset");
+		expect(refused).toContain("pi-repl.json asks for /tmp/pan-out");
+		const unasked = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, boot: { on: true, dir: "/elsewhere" } } }));
+		expect(unasked).toContain("cell stream tee: ON");
+		expect(unasked).toContain("set outside pi-repl.json");
 	});
 
 	test("restart always flushes first; only fresh skips the revive", () => {

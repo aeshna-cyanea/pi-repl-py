@@ -16,6 +16,16 @@
   feeding `status`. Helper entries now carry their path, byte size and mtime, and the advertised block has
   one home (`formatHelpersBlock`) instead of being re-derived in two places.
 
+- The **cell stream tee**: each executed cell's complete stdout+stderr written by the bridge to
+  `<captureDir>/<session>/cell-<n>.txt`, plus a `viewLines` bound (default 120) on what the model is
+  shown, with a marker naming the file and the line to resume from. Opt-in (`captureDir` in
+  `pi-repl.json`, `""` by default): with it off the channel cap is unchanged byte for byte and the
+  marker says the copy does not exist, because a pointer at data we do not have is a lie, not a
+  nicety. Files carry the kernel's own cell number, so `cell-<n>.txt` and `In[<n>]` name one cell; the
+  tee is bounded per cell (`PI_REPL_CAPTURE_MAX_BYTES`) with the cut written into the copy and repeated
+  in the marker; and the bridge reports at boot whether the tee will actually write, which `repl status`
+  shows next to what `pi-repl.json` asked for, since a wish and a witness are different things.
+
 ### Changed
 
 - Cell history is back ON, and the result-object cache is OFF. `store_history: false` (0.6.12) was

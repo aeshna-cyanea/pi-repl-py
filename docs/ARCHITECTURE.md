@@ -104,9 +104,34 @@ Failure semantics have contract tests.
 the pipe's EOF and the exit code, settles the running cell with an error, and the next call
 rebuilds from the last snapshot.
 
-**Output is capped per channel and per line**, both announced with markers: channels accumulate
-against `maxOutputChars` (checked within each event), and each line is capped at 4096 chars, so
-one oversized line cannot own the budget while long JSON/reprs/errors pass whole.
+**Output is bounded, never silently dropped.** Two modes, one rule: a bound is only honest when a
+pointer at the whole thing exists.
+
+- **tee off (`captureDir: ""`, the default)** — the old behaviour, byte for byte: channels accumulate
+  against `maxOutputChars` and each line against 4,096 chars, each cut announced with a marker. The
+  withheld text is gone; only the marker survives, and the marker says there is no copy.
+- **tee on** — the bridge writes each cell's COMPLETE stdout+stderr to
+  `<captureDir>/<session>/cell-<n>.txt` before any cap exists, and the engine's view bound (`viewLines`,
+  default 120: measured over 25,413 tool results in 83 session trees, p90 = 62 lines, p95 = 92,
+  p99 = 245, so 120 clips 3.4%) trims only what the model is *shown*, naming the file and the line to
+  resume from. The totals in that marker are the tee's, not the head's, so a bounded view cannot
+  understate what it withheld.
+
+Why the tee lives in the bridge and not inside the kernel: ipykernel owns the fd level.
+`_setup_stream_redirects` (`iostream.py:619-628`) dup2s a pipe over fd 1/2 for each cell and a watcher
+thread republishes whatever lands there, so output leaves the kernel by two routes and neither contains
+the other — `sys.stdout`/`OutStream` carries Python writes, the fd watcher carries children that
+inherited fd 1, C-level writes and `os.write(1, …)`. A `sys.stdout` proxy misses the second route; the
+TS host sits past the cap and has already dropped the bytes. The bridge's poll loop is the one place
+both routes exist as one stream. A capture is named by the number `execute_input` publishes, which is
+the number IPython gives that same cell (`kernelbase.py:868-869`; `ipkernel.py:309-318` makes the
+kernel's counter the shell's, and IPython takes the number before advancing it), so `cell-<n>.txt` and
+`In[<n>]` name one cell and nothing has to guess which cell a capture belongs to. The session name is
+told to the bridge (`PAN_SESSION_STEM`), never inferred from mtimes. The tee has its own bound
+(`PI_REPL_CAPTURE_MAX_BYTES`, default 32 MiB) so a runaway loop cannot own the tier: frames are sliced
+inside the bound, the cut is written into the file, reported in the marker, and the boot report says
+whether the tee is on at all (`repl status`) — a component that is off without saying so reads exactly
+like one that is working.
 
 **Cancellation is real.** An abort makes the bridge send `interrupt_request`, raising a genuine
 `KeyboardInterrupt`; the namespace survives. Cells wedged in C code (which ignore interrupts)
@@ -203,7 +228,7 @@ saved past; a first-ever session stays quiet.
 | Cell silent or wedged | the watchdog sends an `interrupt_request`; a caller abort kills the kernel only if it is still running after a 20-second grace |
 | Kernel dies | the running cell settles with an error; the next call builds a fresh kernel and restores the last snapshot **before** the triggering cell |
 | Host exits | `process.on("exit")` SIGKILLs live kernels (a child does not die with its parent) |
-| Output flood | capped per channel, truncation announced |
+| Output flood | bounded: the view is capped and the marker points at the cell's complete stream (or says there is no copy) |
 
 ## Testing
 

@@ -10,7 +10,7 @@
  * which is why this suite is slow and kept out of `just check`.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateSync } from "node:zlib";
@@ -850,6 +850,144 @@ create: () =>
 		expect(r.status).toBe("ok");
 		expect(r.stdout).toContain("some lines exceeded 4096 chars");
 		expect(r.stdout.length).toBeLessThan(4300);
+	});
+
+	/**
+	 * The cell stream tee. Proven end to end rather than at the unit seam because every layer between the
+	 * kernel and my context could be the one that lies: ipykernel dup2s a watchfd over fd 1/2 per cell
+	 * (iostream.py:619-628) so children and C writes reach the bridge as stream frames that no in-kernel
+	 * `sys.stdout` proxy would ever see, the bridge holds those frames before any cap exists, and the
+	 * engine trims what I am SHOWN only because the bridge can name the whole thing.
+	 */
+	describe("cell stream tee: a complete copy is what earns a bounded view", () => {
+		const STEM = "2026-01-01T00-00-00-000Z_teetest";
+		const teeEnv = (capDir: string, extra: Record<string, string> = {}) => ({
+			PI_REPL_CAPTURE_DIR: capDir,
+			PAN_SESSION_STEM: STEM,
+			...extra,
+		});
+		const numbers = (dir: string) => readdirSync(dir).map((f) => Number(f.slice(5, 11)));
+
+		test("a cell over the view budget: the file holds every line and the view names the file", { timeout: 60_000 }, async () => {
+			const d = tempDir();
+			const capDir = tempDir();
+			const m = engine({ cwd: d, env: teeEnv(capDir, { PI_REPL_VIEW_LINES: "20" }) });
+
+			// a silent cell gets no file, and neither does any housekeeping op (names, snapshot): the tee
+			// buckets only what `emit_stream` carried, so a tier of empty files never accumulates
+			const quiet = await m.execute("x = 1");
+			expect(quiet.status).toBe("ok");
+			expect(quiet.capture).toBeUndefined();
+			expect(existsSync(join(capDir, STEM))).toBe(false);
+
+			const r = await m.execute("for i in range(500): print(f'line {i}')");
+			expect(r.status).toBe("ok");
+			const dir = join(capDir, STEM);
+			const files = readdirSync(dir);
+			expect(files.length).toBe(1);
+			expect(files[0]).toMatch(/^cell-\d{6}\.txt$/);
+			const file = join(dir, files[0]);
+			const whole = readFileSync(file, "utf8");
+			// the tee stores the frames, not a normalised copy: 500 printed lines, final newline included
+			expect(whole.endsWith("line 499\n")).toBe(true);
+			expect(whole.split("\n").length).toBe(501);
+
+			// the pointer the engine aims its view at, and the totals it states: the tee's, not the head's
+			expect(r.capture?.path).toBe(file);
+			expect(r.capture?.stdout?.lines).toBe(500);
+			expect(r.stdout.split("\n").length).toBe(22); // 20 shown + marker + the peek hint
+			expect(r.stdout).toContain("500 lines, ");
+			expect(r.stdout).toContain(`full text: ${file}]`);
+			expect(r.stdout).toContain(`peek('${file}', start=21)`);
+			expect(r.stdout).not.toContain("line 499");
+		});
+
+		test("no capture dir means no pointer and the old cap byte for byte, with no path invented", { timeout: 60_000 }, async () => {
+			const d = tempDir();
+			const m = engine({ cwd: d, env: { PAN_SESSION_STEM: STEM, PI_REPL_VIEW_LINES: "20" } });
+			const r = await m.execute("for i in range(500): print(f'line {i}')");
+			expect(r.capture).toBeUndefined();
+			expect(r.stdout).toContain("line 499"); // nothing was withheld: the negative control
+			expect(r.stdout).not.toContain("full text:");
+			expect(r.stdout).not.toContain("peek(");
+		});
+
+		/**
+		 * The join the whole naming scheme buys: `cell-<n>.txt` and `In[<n>]` are the same cell, so a
+		 * refusal, a history row and its output copy line up without anybody guessing. ipykernel publishes
+		 * the number BEFORE IPython advances its counter (kernelbase.py:868-869, and ipkernel.py:309-318
+		 * makes the kernel's counter the shell's), and IPython takes the number then increments
+		 * (interactiveshell.py: `execution_count = ... = self.execution_count`, then `+= 1` when
+		 * store_history) — so a cell that prints its own counter prints n+1. The witness is the history
+		 * database's own line number, which is what `%history`, `_i<n>` and my `redo(n=)` address.
+		 */
+		test("the copy is named by the number the history database gives that cell", { timeout: 60_000 }, async () => {
+			const d = tempDir();
+			const capDir = tempDir();
+			const m = engine({ cwd: d, env: teeEnv(capDir) });
+
+			const a = await m.execute("print('TEE-MARKER-A')\nfor i in range(3): print(f'a{i}')");
+			expect(a.status).toBe("ok");
+			// the pattern is built at runtime: a searcher whose own source contains the marker would match
+			// itself, and a test that matches itself proves nothing (this one learned that the hard way)
+			// hm.search has no session filter and ~/.ipython/profile_default/history.sqlite is box-global:
+			// every kernel on this box writes there, mine included. Unfiltered, this returned [1336, 2] and
+			// 1336 was a cell in my own live session whose source happened to quote the marker.
+			const b = await m.execute(
+				"pat = '*' + 'TEE' + '-MARKER-A' + '*'\n"
+					+ "hm = get_ipython().history_manager\n"
+					+ "print(sorted(n for (s, n, src) in hm.search(pat) if s == hm.session_number))",
+			);
+			expect(b.status).toBe("ok");
+
+			const dir = join(capDir, STEM);
+			const ns = numbers(dir).sort((x, y) => x - y);
+			expect(ns.length).toBe(2); // only the cells that spoke: no file for the boot ops
+			const nA = ns[0];
+			expect(b.stdout.trim()).toBe(`[${nA}]`);
+			expect(readFileSync(join(dir, `cell-${String(nA).padStart(6, "0")}.txt`), "utf8")).toContain("a2\n");
+		});
+
+		test("one file per cell holds both channels, and states each channel's own totals", { timeout: 60_000 }, async () => {
+			const d = tempDir();
+			const capDir = tempDir();
+			const m = engine({ cwd: d, env: teeEnv(capDir) });
+			const r = await m.execute("import sys\nprint('out-1')\nprint('err-1', file=sys.stderr)\nprint('out-2')");
+			expect(r.status).toBe("ok");
+			expect(r.stdout).toContain("out-1");
+			expect(r.stderr).toContain("err-1");
+			const files = readdirSync(join(capDir, STEM));
+			expect(files.length).toBe(1);
+			const whole = readFileSync(join(capDir, STEM, files[0]), "utf8");
+			expect(whole).toContain("out-1\nout-2\n");
+			expect(whole).toContain("[stderr]\nerr-1\n");
+			expect(r.capture?.stdout?.lines).toBe(2);
+			expect(r.capture?.stderr?.lines).toBe(1);
+		});
+
+		test("the tee's own byte bound cuts a runaway cell, inside the file and in the marker", { timeout: 60_000 }, async () => {
+			const d = tempDir();
+			const capDir = tempDir();
+			const MAX = "2000";
+			const m = engine({ cwd: d, env: teeEnv(capDir, { PI_REPL_CAPTURE_MAX_BYTES: MAX, PI_REPL_VIEW_LINES: "10" }) });
+			// the knob has to reach the bridge process, and the kernel inherits that env: if this reads
+			// None the tee is silently running at 32 MiB and the rest of the test would prove nothing
+			const probe = await m.execute("import os\nprint(os.environ.get('PI_REPL_CAPTURE_MAX_BYTES'))");
+			expect(probe.stdout.trim()).toBe(MAX);
+
+			const r = await m.execute("for i in range(200): print('y' * 100)");
+			expect(r.status).toBe("ok");
+			const dir = join(capDir, STEM);
+			const ns = numbers(dir).sort((x, y) => x - y);
+			expect(ns.length).toBe(2);
+			const file = join(dir, `cell-${String(ns[1]).padStart(6, "0")}.txt`);
+			const whole = readFileSync(file, "utf8");
+			expect(whole.length).toBeLessThan(3000);
+			expect(whole).toContain(`the capture stopped at ${MAX} bytes`);
+			expect(r.capture?.stdout?.cut).toBe(true);
+			// the marker's numbers are then the tee's, so it has to say the copy itself is capped
+			expect(r.stdout).toContain("note: the copy hit its own byte bound");
+		});
 	});
 
 	test("listNamespaceNames lists user state and excludes helpers", { timeout: 60_000 }, async () => {

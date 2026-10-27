@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { type HelperLoadResult, KernelClient, type SurfaceAnswer } from "./kernel.js";
+import { type CaptureBootState, type HelperLoadResult, KernelClient, type StreamCapture, type SurfaceAnswer } from "./kernel.js";
 
 export type { HelperLoadResult } from "./kernel.js";
 
@@ -31,6 +31,13 @@ export const MAX_OUTPUT_LINE_CHARS = 4096;
  *  it on this bridge — `'x';` and `'x'` echo identically, so `;` is not a mitigation here. */
 export const DEFAULT_MAX_RESULT_LINES = 40;
 export const DEFAULT_MAX_RESULT_CHARS = 4000;
+/** The view bound: how many lines of a cell's stream I am shown before the marker points at the
+ *  complete copy. Measured 2026-10-27 across 25,413 tool results in 83 session trees: p90 = 62 lines,
+ *  p95 = 92, p99 = 245, max 1,789 -- so 120 clips 3.4% of results and leaves 96.6% whole. It is ONE
+ *  knob for the whole stack: `viewLines` in pi-repl.json arrives here as PI_REPL_VIEW_LINES, and the
+ *  same value is handed to the kernel so panlib's own view verbs (peek/show/cap/run) default to it.
+ *  "How much a cell shows me" is then configured in exactly one place. */
+export const DEFAULT_OUTPUT_VIEW_LINES = 120;
 const ABORT_GRACE_MS = 20_000;
 /** Shared deadline: bounds a wedged boot (lifecycle) and a wedged background restore alike. */
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
@@ -53,12 +60,16 @@ export interface ExecuteResult {
 	durationMs: number;
 	/** Carried through from the bridge untouched — see `CellResult.card`. */
 	card?: unknown;
+	/** Pointer at the cell's complete stream, when the bridge tee wrote one. */
+	capture?: StreamCapture;
 }
 
 export interface ExecuteOptions {
 	/** Aborting cancels the cell via kernel interrupt; the namespace is preserved. */
 	signal?: AbortSignal;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
+	/** Lines of stream I am shown before the pointer to the complete copy. Default DEFAULT_OUTPUT_VIEW_LINES. */
+	viewLines?: number;
 	maxOutputChars?: number;
 }
 
@@ -138,6 +149,43 @@ export function boundResult(text: string, maxLines: number = DEFAULT_MAX_RESULT_
 		(byChars ? `, cut at ${maxChars} chars` : "") +
 		". the kernel keeps no unbound value: assign it (x = ...) to get it whole ...]";
 	return { text: `${kept}\n${marker}`, trimmed: true, lines: lines.length, shownLines, chars };
+}
+
+export interface BoundView extends BoundResult { path?: string; cutByChars: boolean }
+
+/** Bound a stream channel to the view budget, and name the complete copy when the tee has one.
+ *  The totals in the marker are the TRUE totals of the cell's stream -- the bridge reports them from
+ *  the bytes it held before any cap ran -- so a bounded view never understates what it withheld, the
+ *  same rule boundResult follows for a result echo. `path` is a pointer at the whole thing, not a
+ *  summary of the head: peek(path, start=N+1) continues where this view stopped (peek's own default
+ *  page size comes from PAN_VIEW_LINES, the same knob my view verbs read). */
+export function boundView(
+	text: string,
+	maxLines: number = DEFAULT_OUTPUT_VIEW_LINES,
+	path?: string,
+	totals?: { lines: number; bytes: number; cut?: boolean },
+	maxChars: number = DEFAULT_MAX_OUTPUT_CHARS,
+): BoundView {
+	const lines = text.split("\n");
+	const shownLines = Math.min(lines.length, Math.max(0, maxLines));
+	const shown = totals?.lines ?? lines.length;
+	const chars = totals?.bytes ?? text.length;
+	if (lines.length <= maxLines && text.length <= maxChars) {
+		return { text, trimmed: false, lines: shown, shownLines: lines.length, chars, path, cutByChars: false };
+	}
+	let kept = lines.slice(0, shownLines).join("\n");
+	let tail = path
+		? `[... ${shown} lines, ${chars} chars — showed ${shownLines}. full text: ${path}]\n    next: peek('${path}', start=${shownLines + 1})`
+		: `[... ${shown} lines, ${chars} chars — showed ${shownLines}. PI_REPL_CAPTURE_DIR is unset: this cell has no complete copy ...]`;
+	// the tee's own byte bound: those totals are what the tee HELD, not what the cell printed, and a
+	// marker that reports the smaller number without saying so is the lie this whole channel exists to avoid.
+	if (totals?.cut) tail += "\n    note: the copy hit its own byte bound — this cell is longer than the numbers above";
+	let cutByChars = false;
+	if (kept.length + tail.length + 1 > maxChars) {
+		kept = kept.slice(0, Math.max(0, maxChars - tail.length - 1));
+		cutByChars = true;
+	}
+	return { text: `${kept}\n${tail}`, trimmed: true, lines: shown, shownLines, chars, path, cutByChars };
 }
 
 const DEFAULT_KEEP_SNAPSHOTS = 25;
@@ -367,6 +415,10 @@ export class EngineManager {
 
 			const started = Date.now();
 			const maxChars = opts.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
+			// One knob for the whole stack: pi-repl.json `viewLines` reaches here as PI_REPL_VIEW_LINES,
+			// and the same value is handed to the kernel for panlib's own view verbs.
+			const viewCfg = Number(process.env.PI_REPL_VIEW_LINES ?? this.options.env?.PI_REPL_VIEW_LINES ?? DEFAULT_OUTPUT_VIEW_LINES);
+			const viewLines = opts.viewLines ?? (Number.isFinite(viewCfg) && viewCfg > 0 ? viewCfg : DEFAULT_OUTPUT_VIEW_LINES);
 			let aborted = false;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 			const onAbort = () => {
@@ -391,8 +443,13 @@ export class EngineManager {
 					maxOutputChars: maxChars,
 				});
 				const status: ExecuteResult["status"] = opts.signal?.aborted ? "aborted" : r.status;
-				// Channel cap (truncateWithMarker), then per-line cap; both append a marker so truncation is explicit.
-				const finalize = (text: string, channelTruncated: boolean): string => {
+				// Two bounds, one rule: nothing is sliced silently. With a capture, the VIEW bound trims what
+				// I am shown and names the complete file -- safe exactly because the bridge holds the whole
+				// cell before any cap exists. Without one, the channel cap is all there is and no path is
+				// claimed, because a pointer at data we do not have is a lie, not a nicety.
+				const capture = r.capture;
+				const finalize = (text: string, channelTruncated: boolean, name: "stdout" | "stderr"): string => {
+					if (capture) return boundView(text, viewLines, capture.path, capture[name]).text;
 					let out = truncateWithMarker(text, maxChars, channelTruncated);
 					const line = capLinesForContext(out);
 					if (line.trimmed) out = `${line.text}\n[... some lines exceeded ${MAX_OUTPUT_LINE_CHARS} chars ...]`;
@@ -400,8 +457,9 @@ export class EngineManager {
 					return out;
 				};
 				return {
-					stdout: finalize(r.stdout, r.truncated?.stdout ?? false),
-					stderr: finalize(r.stderr, r.truncated?.stderr ?? false),
+					stdout: finalize(r.stdout, r.truncated?.stdout ?? false, "stdout"),
+					stderr: finalize(r.stderr, r.truncated?.stderr ?? false, "stderr"),
+					capture,
 					// the result rides its own budget, not the channel budget: see DEFAULT_MAX_RESULT_LINES
 					result: r.result !== undefined ? boundResult(String(r.result)).text : undefined,
 					error: r.error,
@@ -566,6 +624,11 @@ export class EngineManager {
 	hasSnapshotHistory(): boolean {
 		const config = this.options.snapshot;
 		return config ? existsSync(dirname(config.path)) : false;
+	}
+
+	/** What the bridge reported at boot about its cell-stream tee; undefined when no kernel has readied. */
+	captureBoot(): CaptureBootState | undefined {
+		return this.kernel?.captureBoot;
 	}
 
 	/** The divergence probe, and the two guards it needs: no kernel means no answer (a cold kernel is the

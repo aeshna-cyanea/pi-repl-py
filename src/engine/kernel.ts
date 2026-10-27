@@ -49,6 +49,30 @@ export interface KernelOptions {
 	snapshot?: { path: string; max_bytes: number; period_ms: number };
 }
 
+/** One cell's complete stream, written by the bridge before any cap ran.
+ *  The engine trims what I am *shown* only because this exists: a pointer at the whole thing is what
+ *  makes a bounded view honest. One file per cell, shared by stdout and stderr; the per-channel
+ *  totals let the view marker state the true size of each channel instead of the size of the head
+ *  that survived. Absent when PI_REPL_CAPTURE_DIR is unset — then the engine keeps its old behaviour
+ *  and says so, because a pointer at data we do not have is a lie, not a nicety. */
+export interface StreamCapture {
+	path: string;
+	/** lines/bytes the tee holds for that channel; `cut` when the tee's own byte bound stopped it. */
+	stdout?: { lines: number; bytes: number; cut?: boolean };
+	stderr?: { lines: number; bytes: number; cut?: boolean };
+	/** Why no file was written, when the bridge declined (e.g. the kernel was never told its stem). */
+	reason?: string;
+}
+
+/** What the bridge says at boot about its own tee. Reported, never inferred: a component that is off
+ *  without saying so reads exactly like a component that is working. */
+export interface CaptureBootState {
+	on: boolean;
+	dir?: string;
+	max_bytes?: number;
+	reason?: string;
+}
+
 export interface CellResult {
 	stdout: string;
 	stderr: string;
@@ -63,6 +87,8 @@ export interface CellResult {
 	 * change to do it.
 	 */
 	card?: unknown;
+	/** Complete stream copy, when the bridge tee wrote one; see `StreamCapture`. */
+	capture?: StreamCapture;
 }
 
 export interface CellOptions {
@@ -120,6 +146,8 @@ interface ActiveCell {
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
 	signal?: AbortSignal;
+	/** Set from the bridge result event; the cell's whole stream lives at this path. */
+	capture?: StreamCapture;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	resolve(result: CellResult): void;
 	reject(error: Error): void;
@@ -171,6 +199,7 @@ export class KernelClient {
 	private readyWaiters: { resolve(msg: BridgeMessage): void; reject(error: Error): void }[] = [];
 	private helperBootReport: HelperLoadResult[] = [];
 	private bootstrapReport?: BootstrapLoadResult;
+	private captureBootReport?: CaptureBootState;
 	private nextId = 0;
 	private _onUnexpectedExit?: () => void;
 	private watchdog?: ReturnType<typeof setInterval>;
@@ -257,6 +286,8 @@ export class KernelClient {
 				this.helperBootReport = helpers;
 				const b = msg.bootstrap as BootstrapLoadResult | null | undefined;
 				this.bootstrapReport = b && typeof b.ok === "boolean" ? b : undefined;
+				const cap = msg.capture as CaptureBootState | null | undefined;
+				this.captureBootReport = cap && typeof cap.on === "boolean" ? cap : undefined;
 				// A failed bootstrap joins the helper report rather than riding its own channel, because the
 				// extension already has a path for "some boot-time code did not load": the toast and the
 				// <repl_helpers_failed> line, which is exactly the shape I act on. During coexistence a
@@ -416,9 +447,14 @@ export class KernelClient {
 			result?: string;
 			error?: { name?: string; message?: string; stack?: string[] };
 			card?: unknown;
+			capture?: StreamCapture;
 		};
 		if (content.result !== undefined) active.result = content.result;
 		if (content.card !== undefined) active.card = content.card;
+		// validated only as far as it is used as text: the path is rendered into my view marker, so a
+		// non-string from a mismatched bridge must not become a line of my context. Everything else the
+		// engine reads are numbers it only formats.
+		if (typeof content.capture?.path === "string") active.capture = content.capture;
 		if (content.error) {
 			active.error = {
 				name: content.error.name ?? "Error",
@@ -448,6 +484,7 @@ export class KernelClient {
 			card: active.card,
 			status,
 			truncated: { stdout: active.stdoutTruncated, stderr: active.stderrTruncated },
+			capture: active.capture,
 		});
 	}
 
@@ -602,6 +639,11 @@ export class KernelClient {
 	/** The bridge's own verdict on the injected line; undefined when no bootstrap was sent. */
 	get bootstrap(): BootstrapLoadResult | undefined {
 		return this.bootstrapReport;
+	}
+
+	/** The bridge's verdict on its own cell-stream tee, taken from the ready event; undefined before ready. */
+	get captureBoot(): CaptureBootState | undefined {
+		return this.captureBootReport;
 	}
 
 	get isRunning(): boolean {

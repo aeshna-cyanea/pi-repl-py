@@ -10,6 +10,7 @@
 export type ReplAction = "status" | "reload" | "restart";
 
 /** Structural: the host reads helper files, this module only ever receives plain facts about them. */
+import type { CaptureBootState } from "../engine/kernel.js";
 import type { HelperEntry } from "./helpers.js";
 
 export interface ReplToolParams {
@@ -113,6 +114,12 @@ export interface StatusFacts {
 		names: number | null;
 	};
 	snapshot: { path: string; exists: boolean; ageMs: number | null; bytes: number | null } | null;
+	/**
+	 * The cell-stream tee: what pi-repl.json asks for, and what the bridge reported about itself at boot.
+	 * Both, because a config is a wish and the bridge is the witness, and a tee that is off without saying
+	 * so reads exactly like a tee that is writing.
+	 */
+	capture: { configuredDir: string; viewLines: number; boot?: CaptureBootState };
 	helpers: {
 		files: readonly HelperEntry[];
 		advertised: readonly AdvertisedEntry[];
@@ -169,6 +176,20 @@ export function formatStatus(f: StatusFacts): string {
 		if (!s.exists && e.hasSnapshotHistory) lines.push("    (the state dir exists; this conversation has a saved past)");
 	} else {
 		lines.push("  snapshot: snapshots are off for this session (no session file / ephemeral)");
+	}
+	// The tee gets its own line because it decides whether a bounded view has a complete copy behind it,
+	// and the two sources (config, bridge) are allowed to disagree: report both, never merge them.
+	const c = f.capture;
+	const ask = c.configuredDir === "" ? "pi-repl.json sets no captureDir" : `pi-repl.json asks for ${c.configuredDir}`;
+	if (!c.boot) {
+		lines.push(`  cell stream tee: ${ask}; view bound ${c.viewLines} line(s); no kernel booted yet, so the bridge has not confirmed it`);
+	} else if (c.boot.on) {
+		lines.push(
+			`  cell stream tee: ON — <stem>/cell-<n>.txt under ${c.boot.dir}; view bound ${c.viewLines} line(s); one cell capped at ${c.boot.max_bytes ?? "?"} B`,
+		);
+		if (c.configuredDir === "") lines.push("    note: the config asks for none, so PI_REPL_CAPTURE_DIR was set outside pi-repl.json");
+	} else {
+		lines.push(`  cell stream tee: OFF — ${c.boot.reason ?? "the bridge declined"} (${ask})`);
 	}
 	const h = f.helpers;
 	const undescribed = h.files.filter((x) => x.description === "").map((x) => x.name);
