@@ -453,7 +453,13 @@ export default function (pi: ExtensionAPI) {
 				const sections = [reset?.notice, formatHelperFailuresLine(helperReport), r.stdout, r.stderr, r.result];
 				const errorLines = r.error ? composeErrorLines(r.error) : undefined;
 				if (r.status === "error" && errorLines) sections.push(errorLines.join("\n"));
-				if (r.status === "aborted") sections.push("[cell aborted]");
+				// An abort carries an error too (KeyboardInterrupt when autumn interrupts, a timeout when the cell
+				// overruns), and `errorLines` above was already computed from it. Line 455 gated the error text on
+				// status === "error", so the abort path pushed a bare marker and dropped the reason -- while the card
+				// at line 462 kept `errorName` for the human. She saw KeyboardInterrupt; I saw a bracket. Measured
+				// 2026-11-13, her report. Same bound as the error path: name + message + at most 10 stack lines.
+				if (r.status === "aborted")
+					sections.push("[cell aborted]" + (errorLines ? "\n" + errorLines.join("\n") : ""));
 				const text = sections.filter((section) => section !== undefined && section !== "").join("\n");
 
 				const details: ExecuteDetails = {
