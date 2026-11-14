@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { EngineManager, VIEW_LINES_ENV, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
+import { EngineManager, VIEW_LINES_ENV, resolveViewLines, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
 import {
 	type HelperEntry,
 	formatDivergenceNote,
@@ -381,11 +381,18 @@ export default function (pi: ExtensionAPI) {
 		wire = { requests: wire.requests + 1, systemChars, toolsChars, payloadChars, at: Date.now() };
 	});
 
+	// The bound the engine will actually use, and the one the kernel's helpers will default to. They are the same
+	// number unless the agent environment exports PAN_VIEW_LINES while pi-repl.json sets viewLines — and when
+	// they are not, the description says so rather than letting me find out from a clipped cell. See
+	// `resolveViewLines`. The kernel env object is rebuilt at the spawn site (line ~229); only this key matters here.
+	const viewReading = resolveViewLines(undefined, process.env, { [VIEW_LINES_ENV]: String(config.viewLines) });
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
 		name: "execute",
 		label: "execute",
 		description: executeToolDescription(
-				config.captureDir ? { dir: config.captureDir, viewLines: config.viewLines } : undefined,
+				config.captureDir
+					? { dir: config.captureDir, viewLines: viewReading.lines, kernelLines: viewReading.kernelLines }
+					: undefined,
 			),
 		promptSnippet: executePromptSnippet,
 		promptGuidelines: buildPromptGuidelines(),

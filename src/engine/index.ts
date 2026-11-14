@@ -46,6 +46,39 @@ export const DEFAULT_OUTPUT_VIEW_LINES = 120;
  *  two equal.
  */
 export const VIEW_LINES_ENV = "PAN_VIEW_LINES";
+/** Where a resolved view bound came from, so a disagreement can name its own source. */
+export type ViewLinesSource = "opts" | "agent-env" | "kernel-env" | "default";
+export interface ViewLinesReading {
+	lines: number;
+	source: ViewLinesSource;
+	/** What the kernel's own view verbs will default to — the extension sets this env from pi-repl.json. */
+	kernelLines: number;
+}
+/**
+	The ONE resolution of the view bound, shared by the engine and by the tool description, because the two
+	used to resolve it separately and a description that states a number the engine never used is exactly the
+	kind of lie this repo keeps testing for.
+
+	Precedence is deliberate, and it is the shape that can split: an env var in the **agent** process beats the
+	value the extension handed the kernel from pi-repl.json. So if an operator exports PAN_VIEW_LINES while
+	pi-repl.json also sets `viewLines`, the harness trims at one number and panlib's peek/show/cap/run default
+	to the other. That is legal — an operator may want a tighter transcript than the helpers' default — but it
+	must never be silent, which is why `kernelLines` travels with the reading and `executeToolDescription`
+	says so when the two differ. Junk (0, "lots", NaN) is ignored rather than obeyed, as in the config parser.
+*/
+export function resolveViewLines(
+	perCall: number | undefined,
+	agentEnv: Record<string, string | undefined>,
+	kernelEnv?: Record<string, string | undefined>,
+): ViewLinesReading {
+	const kernelRaw = Number(kernelEnv?.[VIEW_LINES_ENV]);
+	const kernelOk = Number.isFinite(kernelRaw) && kernelRaw > 0;
+	const kernelLines = kernelOk ? kernelRaw : DEFAULT_OUTPUT_VIEW_LINES;
+	if (perCall !== undefined && Number.isFinite(perCall) && perCall > 0) return { lines: perCall, source: "opts", kernelLines };
+	const agentRaw = Number(agentEnv?.[VIEW_LINES_ENV]);
+	if (Number.isFinite(agentRaw) && agentRaw > 0) return { lines: agentRaw, source: "agent-env", kernelLines };
+	return { lines: kernelLines, source: kernelOk ? "kernel-env" : "default", kernelLines };
+}
 const ABORT_GRACE_MS = 20_000;
 /** Shared deadline: bounds a wedged boot (lifecycle) and a wedged background restore alike. */
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
@@ -449,10 +482,9 @@ export class EngineManager {
 
 			const started = Date.now();
 			const maxChars = opts.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
-			// One knob for the whole stack: pi-repl.json `viewLines` reaches here as VIEW_LINES_ENV,
-			// and the same value is handed to the kernel for panlib's own view verbs.
-			const viewCfg = Number(process.env[VIEW_LINES_ENV] ?? this.options.env?.[VIEW_LINES_ENV] ?? DEFAULT_OUTPUT_VIEW_LINES);
-			const viewLines = opts.viewLines ?? (Number.isFinite(viewCfg) && viewCfg > 0 ? viewCfg : DEFAULT_OUTPUT_VIEW_LINES);
+			// One knob for the whole stack, resolved by the SAME function the tool description uses — see
+			// `resolveViewLines`. A bound stated in the prompt and a bound used here are one fact, not two.
+			const viewLines = resolveViewLines(opts.viewLines, process.env, this.options.env).lines;
 			let aborted = false;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 			const onAbort = () => {

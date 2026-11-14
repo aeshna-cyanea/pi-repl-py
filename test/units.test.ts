@@ -25,6 +25,7 @@ import {
 	pruneOrphanedSnapshotDirs,
 	pruneSnapshotDirs,
 	VIEW_LINES_ENV,
+	resolveViewLines,
 } from "../src/engine/index.js";
 import { type CellResult, DEFAULT_BOOTSTRAP, KernelClient } from "../src/engine/kernel.js";
 import {
@@ -1092,7 +1093,11 @@ describe("pi-repl.json config", () => {
 	test("the view knob crosses the kernel boundary as one constant, and panlib reads that same name", () => {
 		expect(VIEW_LINES_ENV).toBe("PAN_VIEW_LINES");
 		const src = readFileSync(join(import.meta.dir, "..", "src", "engine", "index.ts"), "utf8");
-		expect(src).toContain("process.env[VIEW_LINES_ENV]"); // the constant is used, not just exported
+		// The pin is on the READ SHAPE, and it moved with the code on purpose: one function now owns the
+		// resolution, so the guard is that the engine hands the AGENT environment to it and that the resolver
+		// reads the constant. A call site re-deriving its own precedence is the drift this test was written for.
+		expect(src).toContain("resolveViewLines(opts.viewLines, process.env, this.options.env)");
+		expect(src).toContain("agentEnv?.[VIEW_LINES_ENV]");
 		// The pin is on the *read shape*, not on the string: the docstring above that constant tells the story
 		// of the drift, and prose is not a read. A whole-file negative assertion is defeated by its own comment.
 		expect(src).not.toMatch(/(?:process\.env|env\?\.)\.PI_REPL_VIEW_LINES\b/);
@@ -1307,6 +1312,44 @@ describe("the execute tool description states the output contract", () => {
 		const head = "in one cell stay available to every later cell.";
 		expect(executeToolDescription()).toContain(head);
 		expect(executeToolDescription({ dir: "/x", viewLines: 1 })).toContain(head);
+	});
+
+	test("a split view bound is stated where I will read it, and an agreed one costs no bytes", () => {
+		// The whole point of `kernelLines`: the harness and panlib's helpers may legally disagree (an operator
+		// exports PAN_VIEW_LINES while pi-repl.json sets viewLines), and the one shape it must never take is quiet.
+		const agreed = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, kernelLines: 120 });
+		expect(agreed).not.toContain("disagree");
+		const split = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 40, kernelLines: 120 });
+		expect(split).toContain("disagree");
+		expect(split).toContain("40 lines");
+		expect(split).toContain("default to 120");
+	});
+});
+
+describe("resolveViewLines: one resolution, named source, and a disagreement that travels with it", () => {
+	test("precedence: per-call, then the agent environment, then the kernel env the extension set, then default", () => {
+		expect(resolveViewLines(7, {}, { [VIEW_LINES_ENV]: "120" })).toEqual({ lines: 7, source: "opts", kernelLines: 120 });
+		expect(resolveViewLines(undefined, { [VIEW_LINES_ENV]: "40" }, { [VIEW_LINES_ENV]: "120" })).toEqual({
+			lines: 40,
+			source: "agent-env",
+			kernelLines: 120,
+		});
+		expect(resolveViewLines(undefined, {}, { [VIEW_LINES_ENV]: "120" })).toEqual({
+			lines: 120,
+			source: "kernel-env",
+			kernelLines: 120,
+		});
+		expect(resolveViewLines(undefined, {}, {})).toEqual({
+			lines: DEFAULT_OUTPUT_VIEW_LINES,
+			source: "default",
+			kernelLines: DEFAULT_OUTPUT_VIEW_LINES,
+		});
+	});
+
+	test("junk is ignored rather than obeyed, and the reading keeps the number the kernel will use", () => {
+		expect(resolveViewLines(undefined, { [VIEW_LINES_ENV]: "lots" }, { [VIEW_LINES_ENV]: "90" }).lines).toBe(90);
+		expect(resolveViewLines(0, {}, { [VIEW_LINES_ENV]: "90" }).lines).toBe(90);
+		expect(resolveViewLines(undefined, { [VIEW_LINES_ENV]: "-5" }, { [VIEW_LINES_ENV]: "90" }).kernelLines).toBe(90);
 	});
 });
 

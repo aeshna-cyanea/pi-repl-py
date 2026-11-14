@@ -1,9 +1,12 @@
-import { DEFAULT_MAX_OUTPUT_CHARS } from "../engine/index.js";
+import { DEFAULT_MAX_OUTPUT_CHARS, VIEW_LINES_ENV } from "../engine/index.js";
 
 /** Which output contract this session is in: bounded with a pointer, or truncated with nothing left. */
 export interface TeeFacts {
 	dir: string;
+	/** What the harness will actually trim at, resolved by `resolveViewLines` — not a config echo. */
 	viewLines: number;
+	/** What the kernel's own view verbs default to. Present only when it is worth naming. */
+	kernelLines?: number;
 }
 
 /**
@@ -18,10 +21,14 @@ export function executeToolDescription(tee?: TeeFacts): string {
 		"Execute Python in a Jupyter notebook. Your workspace is one persistent live session: every " +
 		"cell runs in the same namespace, so variables, functions, classes, imports, and data defined " +
 		"in one cell stay available to every later cell.";
-	return tee
-		? `${head} Output is bounded to ${tee.viewLines} lines; the complete stream of every cell is kept at ${tee.dir}/<session>/cell-<n>.txt, and the marker names that file`
-
-		: `${head} Output is truncated to ${DEFAULT_MAX_OUTPUT_CHARS} chars with an explicit marker`;
+	if (!tee) return `${head} Output is truncated to ${DEFAULT_MAX_OUTPUT_CHARS} chars with an explicit marker`;
+	// Zero bytes when the two halves agree, one clause when they do not: a split bound is legal (an operator may
+	// want a tighter transcript than the helpers' default) and silent is the one shape it must never take.
+	const split =
+		tee.kernelLines !== undefined && tee.kernelLines !== tee.viewLines
+			? `; NOTE the two halves disagree — the harness trims at ${tee.viewLines} lines while the kernel's own view verbs (peek/show/cap/run) default to ${tee.kernelLines}: the agent environment set ${VIEW_LINES_ENV} and pi-repl.json set viewLines`
+			: "";
+	return `${head} Output is bounded to ${tee.viewLines} lines; the complete stream of every cell is kept at ${tee.dir}/<session>/cell-<n>.txt, and the marker names that file${split}`;
 }
 export const executePromptSnippet = "Execute Python in a Jupyter notebook (read, write, run, search, and more)";
 
