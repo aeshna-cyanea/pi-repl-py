@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { EngineManager, VIEW_LINES_ENV, resolveViewLines, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
+import { EngineManager, VIEW_CHARS_ENV, VIEW_LINES_ENV, resolveViewChars, resolveViewLines, pruneOrphanedSnapshotDirs, pruneSnapshotDirs } from "./src/engine/index.js";
 import {
 	type HelperEntry,
 	formatDivergenceNote,
@@ -227,6 +227,7 @@ export default function (pi: ExtensionAPI) {
 					// half-set knob reads exactly like a tee that works
 					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
 					[VIEW_LINES_ENV]: String(config.viewLines),
+					[VIEW_CHARS_ENV]: String(config.viewChars),
 					PI_REPL_CAPTURE_MAX_BYTES: String(config.cellMaxMb * 1024 * 1024),
 				},
 				// --- snapshots are per-conversation; skipRestore marks the wedged-boot retry ---
@@ -386,12 +387,13 @@ export default function (pi: ExtensionAPI) {
 	// they are not, the description says so rather than letting me find out from a clipped cell. See
 	// `resolveViewLines`. The kernel env object is rebuilt at the spawn site (line ~229); only this key matters here.
 	const viewReading = resolveViewLines(undefined, process.env, { [VIEW_LINES_ENV]: String(config.viewLines) });
+	const charsReading = resolveViewChars(undefined, process.env, { [VIEW_CHARS_ENV]: String(config.viewChars) });
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
 		name: "execute",
 		label: "execute",
 		description: executeToolDescription(
 				config.captureDir
-					? { dir: config.captureDir, viewLines: viewReading.lines, kernelLines: viewReading.kernelLines }
+					? { dir: config.captureDir, viewLines: viewReading.lines, kernelLines: viewReading.kernelLines, viewChars: charsReading.chars, kernelChars: charsReading.kernelChars }
 					: undefined,
 			),
 		promptSnippet: executePromptSnippet,
@@ -549,7 +551,7 @@ export default function (pi: ExtensionAPI) {
 						names,
 					},
 					snapshot,
-					capture: { configuredDir: config.captureDir, viewLines: config.viewLines, boot: m?.captureBoot() },
+					capture: { configuredDir: config.captureDir, viewLines: config.viewLines, viewChars: config.viewChars, boot: m?.captureBoot() },
 					helpers: {
 						files: disk,
 						advertised: adv.map((entry) => ({ name: entry.name, chars: formatHelperLine(entry).length })),

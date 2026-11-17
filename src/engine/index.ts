@@ -79,6 +79,98 @@ export function resolveViewLines(
 	if (Number.isFinite(agentRaw) && agentRaw > 0) return { lines: agentRaw, source: "agent-env", kernelLines };
 	return { lines: kernelLines, source: kernelOk ? "kernel-env" : "default", kernelLines };
 }
+/**
+ *  The char half of the view bound. The line bound is not enough: measured over the 400 newest capture and
+ *  tee files, the longest line inside each is p50 190 chars, p90 590, p99 16,070, max 150,904 — 7 files over
+ *  4,000 and 4 over 20,000. A single 150,904-char line is ONE line, so a 120-line bound passes it whole and
+ *  one stroke costs about 38k tokens. One bound, then: keep whole lines until the budget is spent and cut
+ *  exactly ONE line, the boundary line that crosses it. 24,000 chars is about 6k tokens.
+ */
+export const DEFAULT_VIEW_CHARS = 24_000;
+/** The ONE name for that knob on both sides of the process boundary; panlib reads the same string as
+ *  `panout.VIEW_CHARS_ENV`. Two names is how a wrong bound becomes invisible. */
+export const VIEW_CHARS_ENV = "PAN_VIEW_CHARS";
+export type ViewCharsSource = "opts" | "agent-env" | "kernel-env" | "default";
+export interface ViewCharsReading {
+	chars: number;
+	source: ViewCharsSource;
+	/** What the kernel's own view verbs will default to — the extension sets this env from pi-repl.json. */
+	kernelChars: number;
+}
+/** The one resolution of the char bound, mirroring `resolveViewLines` exactly: a per-call value wins, then
+ *  the agent env, then the env the extension handed the kernel, then the default. Junk (0, "lots", -5) is
+ *  ignored rather than obeyed. `kernelChars` travels with the reading so a harness/kernel disagreement can
+ *  name its own source instead of being inferred. */
+export function resolveViewChars(
+	perCall: number | undefined,
+	agentEnv: Record<string, string | undefined>,
+	kernelEnv?: Record<string, string | undefined>,
+): ViewCharsReading {
+	const kernelRaw = Number(kernelEnv?.[VIEW_CHARS_ENV]);
+	const kernelOk = Number.isFinite(kernelRaw) && kernelRaw > 0;
+	const kernelChars = kernelOk ? kernelRaw : DEFAULT_VIEW_CHARS;
+	if (perCall !== undefined && Number.isFinite(perCall) && perCall > 0) return { chars: perCall, source: "opts", kernelChars };
+	const agentRaw = Number(agentEnv?.[VIEW_CHARS_ENV]);
+	if (Number.isFinite(agentRaw) && agentRaw > 0) return { chars: agentRaw, source: "agent-env", kernelChars };
+	return { chars: kernelChars, source: kernelOk ? "kernel-env" : "default", kernelChars };
+}
+
+/** True when `lines` cannot fit `budget` chars counting one newline per line. Mirrors panout.over_budget. */
+export function overBudget(lines: string[], budget: number): boolean {
+	let used = 0;
+	for (const l of lines) {
+		used += l.length + 1;
+		if (used > budget) return true;
+	}
+	return false;
+}
+
+/**
+ *  Keep whole lines while the budget holds, then cut exactly ONE line — the boundary line that crosses it —
+ *  and stop. A per-line cap would chop every long line in the window at once, and autumn rejected that
+ *  shape: "it wouldn't make sense to return multiple truncated lines." `cut` is the number of characters of
+ *  the boundary line that survived, or null when nothing was cut. `fromFront=false` walks from the back and
+ *  keeps the boundary line's SUFFIX, for a tail-style view: the loss always sits furthest from what was asked.
+ *  Mirrors panlib's `_budget` (pan/lib/panlib/output/panout.py); the two must agree or the halves disagree by
+ *  construction, so the expectations are pinned on both sides:
+ *  budgetLines(["aaaa","bbbb","cccc"], 11) -> ["aaaa","bbbb","c"] cut 1 · (_, 15) all three whole cut null ·
+ *  (_, 4) ["aaaa"] cut 4 · (_, 11, false) ["a","bbbb","cccc"] cut 1.
+ */
+/** What the char clause added to the marker costs, reserved before the cut so the ceiling the marker claims
+ *  is the ceiling that actually holds. See the re-fit in `boundView`. */
+export const BOUND_CLAUSE_RESERVE = 160;
+
+export function budgetLines(lines: string[], budget: number, fromFront = true): { lines: string[]; cut: number | null } {
+	if (!(budget >= 1)) throw new Error(`budgetLines: budget must be at least 1, got ${budget}`);
+	const out: string[] = [];
+	let used = 0;
+	if (!fromFront) {
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const l = lines[i];
+			if (used + l.length + 1 <= budget) {
+				out.unshift(l);
+				used += l.length + 1;
+				continue;
+			}
+			const room = Math.max(0, budget - used);
+			out.unshift(l.slice(l.length - room));
+			return { lines: out, cut: room };
+		}
+		return { lines: out, cut: null };
+	}
+	for (const l of lines) {
+		if (used + l.length + 1 <= budget) {
+			out.push(l);
+			used += l.length + 1;
+			continue;
+		}
+		const room = Math.max(0, budget - used);
+		out.push(l.slice(0, room));
+		return { lines: out, cut: room };
+	}
+	return { lines: out, cut: null };
+}
+
 const ABORT_GRACE_MS = 20_000;
 /** Shared deadline: bounds a wedged boot (lifecycle) and a wedged background restore alike. */
 export const DEFAULT_BOOT_TIMEOUT_MS = 90_000;
@@ -111,6 +203,8 @@ export interface ExecuteOptions {
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	/** Lines of stream I am shown before the pointer to the complete copy. Default DEFAULT_OUTPUT_VIEW_LINES. */
 	viewLines?: number;
+	/** Chars of that view the budget may spend, one boundary line cut at most. Default DEFAULT_VIEW_CHARS. */
+	viewChars?: number;
 	maxOutputChars?: number;
 }
 
@@ -201,6 +295,13 @@ export interface BoundView extends BoundResult { path?: string; cutByChars: bool
  *  summary of the head: peek(path, start=N+1) continues where this view stopped (peek's own default
  *  page size comes from PAN_VIEW_LINES, the same knob my view verbs read).
  *
+ *  THREE ceilings live here and they are not the same number: the VIEW budget (`maxChars`, default
+ *  DEFAULT_VIEW_CHARS 24,000) is what I am shown; the kernel's CHANNEL ceiling (DEFAULT_MAX_OUTPUT_CHARS
+ *  46,080, `accumulate()` in kernel.ts) is what reaches this function at all; and on the no-tee route
+ *  `truncateWithMarker` plus `capLinesForContext` (MAX_OUTPUT_LINE_CHARS 4,096, per line) is all that exists
+ *  because no complete copy was written. The asymmetry with the per-line cap is stated, not discovered: the
+ *  no-tee route chops every over-long line because there is nothing else to keep, and it says so.
+ *
  *  `totals.droppedBytes` is the kernel's own channel cap biting BEFORE this function is reached:
  *  `accumulate()` in kernel.ts holds at most `maxOutputChars` per channel and drops the rest, and that
  *  ceiling is numerically equal to this function's own `maxChars` (46,080). A head that arrives pre-cut
@@ -217,7 +318,8 @@ export function boundView(
 	 *  knows one of them (the preview knows `preview`, finalize knows the tee's counts) must be able to say
 	 *  just that. `lines`/`bytes` fall back to the text in hand when absent. */
 	totals?: { lines?: number; bytes?: number; cut?: boolean; droppedBytes?: number; preview?: boolean },
-	maxChars: number = DEFAULT_MAX_OUTPUT_CHARS,
+	/** The VIEW budget in chars — not the channel ceiling, not the per-line cap. See the three ceilings above. */
+	maxChars: number = DEFAULT_VIEW_CHARS,
 ): BoundView {
 	const lines = text.split("\n");
 	const shown = totals?.lines ?? lines.length;
@@ -229,13 +331,20 @@ export function boundView(
 	if (shown <= maxLines && text.length <= maxChars && dropped === 0) {
 		return { text, trimmed: false, lines: shown, shownLines: lines.length, chars, path, cutByChars: false };
 	}
-	const shownLines = Math.min(shown, Math.max(0, maxLines));
+	const shownLines0 = Math.min(shown, Math.max(0, maxLines));
+	let shownLines = shownLines0;
 	let kept = shownLines < lines.length ? lines.slice(0, shownLines).join("\n") : text;
-	let tail = path
-		? `[... ${shown} lines, ${chars} chars — showed ${shownLines}. full text: ${path}]\n    next: peek('${path}', start=${shownLines + 1})`
-		: totals?.preview
-			? `[... ${shown} lines, ${chars} chars — showed ${shownLines}. a bounded preview; the settled cell lands in full ...]`
-			: `[... ${shown} lines, ${chars} chars — showed ${shownLines}. PI_REPL_CAPTURE_DIR is unset: this cell has no complete copy ...]`;
+	// One wording for the marker, because a cut changes the numbers and a second copy of the sentence is how
+	// the two drift apart. `bound` is the char clause; it is absent when the line bound alone decided.
+	const mkTail = (shownShown: number, bound?: string): string => {
+		const extra = bound ? `; view bound ${bound}` : "";
+		return path
+			? `[... ${shown} lines, ${chars} chars — showed ${shownShown}${extra}. full text: ${path}]\n    next: peek('${path}', start=${shownShown + 1})`
+			: totals?.preview
+				? `[... ${shown} lines, ${chars} chars — showed ${shownShown}${extra}. a bounded preview; the settled cell lands in full ...]`
+				: `[... ${shown} lines, ${chars} chars — showed ${shownShown}${extra}. PI_REPL_CAPTURE_DIR is unset: this cell has no complete copy ...]`;
+	};
+	let tail = mkTail(shownLines);
 	// named as its own sentence rather than folded into the totals: whose ceiling bit changes where the
 	// complete copy lives, and "the numbers above are not the cell's" is a different claim from "bytes
 	// were dropped on the way here".
@@ -247,10 +356,27 @@ export function boundView(
 	// the tee's own byte bound: those totals are what the tee HELD, not what the cell printed, and a
 	// marker that reports the smaller number without saying so is the lie this whole channel exists to avoid.
 	if (totals?.cut) tail += "\n    note: the copy hit its own byte bound — this cell is longer than the numbers above";
+	// The char budget keeps whole lines and cuts at most ONE boundary line, and the peek hint resumes AT the
+	// line that was cut, never past it. The raw slice this replaces used to trim one 150,904-char line down to
+	// the ceiling while the marker still claimed "showed 1" — a mid-line cut is the one form of withholding
+	// no lexical gate can see.
 	let cutByChars = false;
-	if (kept.length + tail.length + 1 > maxChars) {
-		kept = kept.slice(0, Math.max(0, maxChars - tail.length - 1));
-		cutByChars = true;
+	const budget = maxChars - tail.length - 1;
+	if (kept.length > budget) {
+		// Reserve room for the clause the marker gains, then RE-FIT the one boundary line so the ceiling the
+		// marker claims is the ceiling that holds: adding text to the marker after cutting is how the bound
+		// overshoots by 50-odd chars, and only a test that asserts the total ever notices.
+		const b = budgetLines(kept.split("\n"), Math.max(1, budget - BOUND_CLAUSE_RESERVE));
+		shownLines = Math.min(shownLines, Math.max(0, b.lines.length - 1));
+		tail = mkTail(shownLines, `${maxChars.toLocaleString("en-US")} of ${chars.toLocaleString("en-US")} chars, 1 line cut at ${(b.cut ?? 0).toLocaleString("en-US")}`);
+		const over = kept.length + 1 + tail.length - maxChars;
+		if (over > 0 && b.lines.length) {
+			const last = b.lines[b.lines.length - 1];
+			b.lines[b.lines.length - 1] = last.slice(0, Math.max(0, last.length - over));
+			b.cut = Math.max(0, (b.cut ?? 0) - over);
+		}
+		kept = b.lines.join("\n");
+		cutByChars = b.cut !== null;
 	}
 	return { text: `${kept}\n${tail}`, trimmed: true, lines: shown, shownLines, chars, path, cutByChars };
 }
@@ -485,6 +611,7 @@ export class EngineManager {
 			// One knob for the whole stack, resolved by the SAME function the tool description uses — see
 			// `resolveViewLines`. A bound stated in the prompt and a bound used here are one fact, not two.
 			const viewLines = resolveViewLines(opts.viewLines, process.env, this.options.env).lines;
+			const viewChars = resolveViewChars(opts.viewChars, process.env, this.options.env).chars;
 			let aborted = false;
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 			const onAbort = () => {
@@ -521,7 +648,7 @@ export class EngineManager {
 						// named for the view to render -- boundView refuses to call a pre-cut head "untrimmed".
 						const ch = capture[name];
 						const viewTotals = ch && channelTruncated ? { ...ch, droppedBytes: Math.max(0, ch.bytes - text.length) } : ch;
-						return boundView(text, viewLines, capture.path, viewTotals).text;
+						return boundView(text, viewLines, capture.path, viewTotals, viewChars).text;
 					}
 					let out = truncateWithMarker(text, maxChars, channelTruncated);
 					const line = capLinesForContext(out);

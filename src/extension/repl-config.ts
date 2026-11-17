@@ -54,6 +54,8 @@ export interface ReplConfig {
 	 * 120 clips 3.4% of results, 60 clips 10.6%.
 	 */
 	viewLines: number;
+	/** Chars the harness may spend on a cell view; at most one line is cut, the boundary line. */
+	viewChars: number;
 	/**
 	 * Bytes one cell's tee file may hold, in megabytes. It bounds a runaway loop, not a session: past this
 	 * the bridge writes what it held, says so INSIDE the file, and moves on. Handed to the bridge as
@@ -69,6 +71,7 @@ export const DEFAULT_REPL_CONFIG: ReplConfig = {
 	drop: [],
 	captureDir: "",
 	viewLines: 120,
+	viewChars: 24000,
 	cellMaxMb: 32,
 };
 
@@ -104,6 +107,11 @@ export function parseReplConfig(raw: unknown, warn: (message: string) => void = 
 		const n = Number(record.viewLines);
 		if (Number.isInteger(n) && n > 0) next.viewLines = n;
 		else warn(`[pi-repl] config viewLines must be a positive integer, got ${String(record.viewLines)}; ignoring`);
+	}
+	if (record.viewChars !== undefined) {
+		const n = Number(record.viewChars);
+		if (Number.isInteger(n) && n > 0) next.viewChars = n;
+		else warn(`[pi-repl] config viewChars must be a positive integer, got ${String(record.viewChars)}; ignoring`);
 	}
 	return next;
 }

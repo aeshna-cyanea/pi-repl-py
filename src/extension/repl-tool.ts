@@ -119,7 +119,7 @@ export interface StatusFacts {
 	 * Both, because a config is a wish and the bridge is the witness, and a tee that is off without saying
 	 * so reads exactly like a tee that is writing.
 	 */
-	capture: { configuredDir: string; viewLines: number; boot?: CaptureBootState };
+	capture: { configuredDir: string; viewLines: number; viewChars: number; boot?: CaptureBootState };
 	helpers: {
 		files: readonly HelperEntry[];
 		advertised: readonly AdvertisedEntry[];
@@ -182,10 +182,10 @@ export function formatStatus(f: StatusFacts): string {
 	const c = f.capture;
 	const ask = c.configuredDir === "" ? "pi-repl.json sets no captureDir" : `pi-repl.json asks for ${c.configuredDir}`;
 	if (!c.boot) {
-		lines.push(`  cell stream tee: ${ask}; view bound ${c.viewLines} line(s); no kernel booted yet, so the bridge has not confirmed it`);
+		lines.push(`  cell stream tee: ${ask}; view bound ${c.viewLines} line(s) and ${c.viewChars} chars; no kernel booted yet, so the bridge has not confirmed it`);
 	} else if (c.boot.on) {
 		lines.push(
-			`  cell stream tee: ON — <stem>/cell-<n>.txt under ${c.boot.dir}; view bound ${c.viewLines} line(s); one cell capped at ${c.boot.max_bytes ?? "?"} B`,
+			`  cell stream tee: ON — <stem>/cell-<n>.txt under ${c.boot.dir}; view bound ${c.viewLines} line(s) and ${c.viewChars} chars; one cell capped at ${c.boot.max_bytes ?? "?"} B`,
 		);
 		if (c.configuredDir === "") lines.push("    note: the config asks for none, so PI_REPL_CAPTURE_DIR was set outside pi-repl.json");
 	} else {

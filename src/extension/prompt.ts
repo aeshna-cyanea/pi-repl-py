@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_OUTPUT_CHARS, VIEW_LINES_ENV } from "../engine/index.js";
+import { DEFAULT_MAX_OUTPUT_CHARS, VIEW_CHARS_ENV, VIEW_LINES_ENV } from "../engine/index.js";
 
 /** Which output contract this session is in: bounded with a pointer, or truncated with nothing left. */
 export interface TeeFacts {
@@ -7,6 +7,9 @@ export interface TeeFacts {
 	viewLines: number;
 	/** What the kernel's own view verbs default to. Present only when it is worth naming. */
 	kernelLines?: number;
+	/** The char half of the same pair — one bound in lines, one in chars, both resolved once. */
+	viewChars: number;
+	kernelChars?: number;
 }
 
 /**
@@ -24,11 +27,13 @@ export function executeToolDescription(tee?: TeeFacts): string {
 	if (!tee) return `${head} Output is truncated to ${DEFAULT_MAX_OUTPUT_CHARS} chars with an explicit marker`;
 	// Zero bytes when the two halves agree, one clause when they do not: a split bound is legal (an operator may
 	// want a tighter transcript than the helpers' default) and silent is the one shape it must never take.
-	const split =
-		tee.kernelLines !== undefined && tee.kernelLines !== tee.viewLines
-			? `; NOTE the two halves disagree — the harness trims at ${tee.viewLines} lines while the kernel's own view verbs (peek/show/cap/run) default to ${tee.kernelLines}: the agent environment set ${VIEW_LINES_ENV} and pi-repl.json set viewLines`
-			: "";
-	return `${head} Output is bounded to ${tee.viewLines} lines; the complete stream of every cell is kept at ${tee.dir}/<session>/cell-<n>.txt, and the marker names that file${split}`;
+	const notes: string[] = [];
+	if (tee.kernelLines !== undefined && tee.kernelLines !== tee.viewLines)
+		notes.push(`the harness trims at ${tee.viewLines} lines while the kernel's own view verbs (peek/show/cap/run) default to ${tee.kernelLines}: the agent environment set ${VIEW_LINES_ENV} and pi-repl.json set viewLines`);
+	if (tee.kernelChars !== undefined && tee.kernelChars !== tee.viewChars)
+		notes.push(`the harness trims at ${tee.viewChars} chars while the kernel's own view verbs default to ${tee.kernelChars}: the agent environment set ${VIEW_CHARS_ENV} and pi-repl.json set viewChars`);
+	const split = notes.length ? `; NOTE the two halves disagree — ${notes.join("; and ")}; a Pi restart makes them agree` : "";
+	return `${head} Output is bounded to ${tee.viewLines} lines and ${tee.viewChars} chars; the complete stream of every cell is kept at ${tee.dir}/<session>/cell-<n>.txt, and the marker names that file${split}`;
 }
 export const executePromptSnippet = "Execute Python in a Jupyter notebook (read, write, run, search, and more)";
 

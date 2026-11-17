@@ -12,6 +12,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resolveHelperDirs } from "../src/engine/helpers-locate.js";
 import type { RestoreResult } from "../src/engine/index.js";
+import { budgetLines, overBudget, resolveViewChars, VIEW_CHARS_ENV, DEFAULT_VIEW_CHARS } from "../src/engine/index.js";
 import {
 	boundResult,
 	boundView,
@@ -1256,13 +1257,13 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 		// Whole-object pins on purpose: a new config field has to earn its default here, in the open.
 		// captureDir "" means the tee is off; viewLines 120 is the measured view budget.
 		const missing = mkdtempSync(join(tmpdir(), "pi-repl-nocfg-"));
-		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "", viewLines: 120, cellMaxMb: 32 });
+		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
 	});
 
 	test("defaultOn and the drop list are read", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-repl-cfg-"));
 		writeFileSync(join(dir, "pi-repl.json"), JSON.stringify({ defaultOn: true, drop: ["sessions", "remote"] }));
-		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, cellMaxMb: 32 });
+		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
 	});
 
 	test("a config file that exists but cannot be parsed is loud, and defaults apply", () => {
@@ -1276,7 +1277,7 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 
 	test("junk entries are ignored with a count, never silently", () => {
 		const warns: string[] = [];
-		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, cellMaxMb: 32 });
+		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
 		expect(warns.join(" ")).toContain("ignored 2");
 		const warns2: string[] = [];
 		expect(parseReplConfig({ defaultOn: "yes", drop: "sessions" }, (m) => warns2.push(m))).toEqual(DEFAULT_REPL_CONFIG);
@@ -1302,7 +1303,7 @@ describe("the execute tool description states the output contract", () => {
 	});
 
 	test("with a tee it says bounded, names the line bound, and says where the whole cell lives", () => {
-		const d = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120 });
+		const d = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, viewChars: 24000 });
 		expect(d).toContain("bounded to 120 lines");
 		expect(d).toContain("/tmp/pan-out/<session>/cell-<n>.txt");
 		expect(d).not.toContain("truncated to");
@@ -1311,18 +1312,63 @@ describe("the execute tool description states the output contract", () => {
 	test("both modes open with the same namespace sentence: that part is not a tee detail", () => {
 		const head = "in one cell stay available to every later cell.";
 		expect(executeToolDescription()).toContain(head);
-		expect(executeToolDescription({ dir: "/x", viewLines: 1 })).toContain(head);
+		expect(executeToolDescription({ dir: "/x", viewLines: 1, viewChars: 24000 })).toContain(head);
 	});
 
 	test("a split view bound is stated where I will read it, and an agreed one costs no bytes", () => {
 		// The whole point of `kernelLines`: the harness and panlib's helpers may legally disagree (an operator
 		// exports PAN_VIEW_LINES while pi-repl.json sets viewLines), and the one shape it must never take is quiet.
-		const agreed = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, kernelLines: 120 });
+		const agreed = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, kernelLines: 120, kernelChars: 24000 });
 		expect(agreed).not.toContain("disagree");
-		const split = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 40, kernelLines: 120 });
+		const split = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 40, viewChars: 24000, kernelLines: 120, kernelChars: 24000 });
 		expect(split).toContain("disagree");
 		expect(split).toContain("40 lines");
 		expect(split).toContain("default to 120");
+		expect(split).not.toContain("viewChars"); // the char half agrees here, so it pays nothing
+		const charSplit = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, viewChars: 8000, kernelLines: 120, kernelChars: 24000 });
+		expect(charSplit).toContain("8000 chars");
+		expect(charSplit).toContain("PAN_VIEW_CHARS");
+	});
+});
+
+describe("the char bound: one budget, one boundary line cut, and ONE name on both sides", () => {
+	test("budgetLines keeps whole lines while the budget holds and cuts exactly ONE boundary line", () => {
+		expect(budgetLines(["aaaa", "bbbb", "cccc"], 11)).toEqual({ lines: ["aaaa", "bbbb", "c"], cut: 1 });
+		expect(budgetLines(["aaaa", "bbbb", "cccc"], 15)).toEqual({ lines: ["aaaa", "bbbb", "cccc"], cut: null });
+		expect(budgetLines(["aaaa", "bbbb", "cccc"], 4)).toEqual({ lines: ["aaaa"], cut: 4 });
+		// The pair counts one separator PER LINE — panlib's `over_budget` sums `len(l) + 1` the same way — so
+		// two 4-char lines need 10, not 9: a budget that exactly fits the joined string is one char short.
+		// The property that matters is that the predicate and the cutter never disagree about where the line is.
+		expect(overBudget(["aaaa", "bbbb"], 10)).toBe(false);
+		expect(overBudget(["aaaa", "bbbb"], 9)).toBe(true);
+		expect(budgetLines(["aaaa", "bbbb"], 10)).toEqual({ lines: ["aaaa", "bbbb"], cut: null });
+	});
+	test("a tail-style budget walks from the back and keeps the boundary line's SUFFIX", () => {
+		expect(budgetLines(["aaaa", "bbbb", "cccc"], 11, false)).toEqual({ lines: ["a", "bbbb", "cccc"], cut: 1 });
+	});
+	test("a budget too small to buy a single char is refused rather than obeyed", () => {
+		expect(() => budgetLines(["aaaa"], 0)).toThrow("at least 1");
+	});
+	test("resolveViewChars: the same precedence as the line bound, junk ignored, source named", () => {
+		expect(resolveViewChars(9000, {}, { [VIEW_CHARS_ENV]: "24000" })).toEqual({ chars: 9000, source: "opts", kernelChars: 24000 });
+		expect(resolveViewChars(undefined, { [VIEW_CHARS_ENV]: "5000" }, { [VIEW_CHARS_ENV]: "24000" })).toEqual({ chars: 5000, source: "agent-env", kernelChars: 24000 });
+		expect(resolveViewChars(undefined, {}, { [VIEW_CHARS_ENV]: "lots" })).toEqual({ chars: DEFAULT_VIEW_CHARS, source: "default", kernelChars: DEFAULT_VIEW_CHARS });
+	});
+	test("a char-cut view stays inside the ceiling, names the cut, and resumes the hint AT the cut line", () => {
+		const r = boundView("x".repeat(200_000) + "\n" + "y".repeat(20) + "\n" + "z".repeat(20), 120, "/x/cell-000011.txt", undefined, 4000);
+		expect(r.text.length).toBeLessThanOrEqual(4000);
+		expect(r.text).toContain("1 line cut at");
+		expect(r.text).toContain("start=1)");
+		expect(r.cutByChars).toBe(true);
+	});
+	const panoutPath = join(homedir(), ".pi", "pan", "lib", "panlib", "output", "panout.py");
+	(existsSync(panoutPath) ? test : test.skip)("panlib exports the SAME env name the fork reads, and hands it to the kernel", () => {
+		const eng = readFileSync(join(import.meta.dir, "..", "src", "engine", "index.ts"), "utf8");
+		expect(eng).toContain("resolveViewChars(opts.viewChars, process.env, this.options.env)");
+		const ext = readFileSync(join(import.meta.dir, "..", "index.ts"), "utf8");
+		expect(ext).toContain("[VIEW_CHARS_ENV]: String(config.viewChars)");
+		const m = /\bVIEW_CHARS_ENV\s*=\s*"([A-Z0-9_]+)"/.exec(readFileSync(panoutPath, "utf8"));
+		expect(m?.[1]).toBe(VIEW_CHARS_ENV);
 	});
 });
 
@@ -2337,7 +2383,7 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 		replMode: true,
 		engine: { running: true, forkInherited: false, restoreSkipped: false, hasSnapshotHistory: false, names: 12 },
 		snapshot: { path: "/tmp/state/ns.snapshot", exists: true, ageMs: 5_000, bytes: 1234 },
-		capture: { configuredDir: "", viewLines: 120 },
+		capture: { configuredDir: "", viewLines: 120, viewChars: 24000 },
 		helpers: {
 			files: [
 				{ name: "capture", description: "cap()", path: "/h/capture.py", bytes: 3181, mtimeMs: Date.now() },
@@ -2384,11 +2430,11 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 	});
 
 	test("status names the cell stream tee, on or off, because an off tee reads like a working one", () => {
-		const on = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, boot: { on: true, dir: "/tmp/pan-out", max_bytes: 33554432 } } }));
+		const on = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/tmp/pan-out", max_bytes: 33554432 } } }));
 		expect(on).toContain("cell stream tee: ON");
 		expect(on).toContain("/tmp/pan-out");
 		expect(on).toContain("view bound 120 line(s)");
-		const off = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, boot: { on: false, reason: "PI_REPL_CAPTURE_DIR is unset: cell streams are capped, not copied" } } }));
+		const off = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, viewChars: 24000, boot: { on: false, reason: "PI_REPL_CAPTURE_DIR is unset: cell streams are capped, not copied" } } }));
 		expect(off).toContain("cell stream tee: OFF");
 		expect(off).toContain("capped, not copied");
 		// no kernel yet: the config is a wish, and status says it is unconfirmed rather than confirming it
@@ -2399,11 +2445,11 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 
 	test("status names the disagreement between the config and the bridge, in both directions", () => {
 		// the failure mode I set myself up to hit tonight: a knob in pi-repl.json that the bridge never got
-		const refused = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, boot: { on: false, reason: "PAN_SESSION_STEM is unset" } } }));
+		const refused = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, boot: { on: false, reason: "PAN_SESSION_STEM is unset" } } }));
 		expect(refused).toContain("cell stream tee: OFF");
 		expect(refused).toContain("PAN_SESSION_STEM is unset");
 		expect(refused).toContain("pi-repl.json asks for /tmp/pan-out");
-		const unasked = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, boot: { on: true, dir: "/elsewhere" } } }));
+		const unasked = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/elsewhere" } } }));
 		expect(unasked).toContain("cell stream tee: ON");
 		expect(unasked).toContain("set outside pi-repl.json");
 	});
