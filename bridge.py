@@ -61,6 +61,30 @@ CAPTURE_MAX_DEFAULT = 32 * 1024 * 1024
 # The session a capture belongs to is TOLD, never guessed: the host passes PAN_SESSION_STEM at spawn
 # (index.ts create()), and a capture filed under a guessed session is a pointer that can lie.
 STEM_ENV = "PAN_SESSION_STEM"
+# Gate refusals arrive from a `pre_run_cell` hook, so the cell never ran: every frame in the stack belongs to
+# my machinery, and the gate has already printed the reason WITH the cell line in it. Publishing that stack
+# costs real context for no information -- measured 2026-11-17, 1,490 of a 2,365-char refusal (63%), pointing
+# at hooks.py:45 -> guard.py:755, which is where the gate lives and not where my mistake is.
+#
+# Keyed on the exception NAME, which is the only thing the wire carries: both classes exist solely to abort a
+# cell (their docstrings say so, including why they are BaseException subclasses), so a genuine internal bug
+# raised under one of these names is the one thing this would hide. That is the accepted cost of the 63%.
+GATE_REFUSALS = frozenset({"TrimRefused", "HelpersShadowed"})
+
+
+def error_from(content):
+    """{name, message, stack} from an iopub `error` message, with a gate refusal's stack dropped.
+
+    A pure function on purpose: this is the one decision in the error path worth a test that does not need a
+    live kernel, and the branch below is one call away from it. The `stack: []` shape is already the file's
+    own precedent -- the "aborted" case builds exactly that, for the same reason (there is no useful frame).
+    """
+    ename = content.get("ename") or "Error"
+    return {
+        "name": ename,
+        "message": content.get("evalue") or "",
+        "stack": [] if ename in GATE_REFUSALS else (content.get("traceback") or []),
+    }
 
 
 def capture_boot_state():
@@ -364,11 +388,7 @@ class Bridge:
                     if found is not None:
                         card = found
                 elif ctype == "error":
-                    error = {
-                        "name": content.get("ename") or "Error",
-                        "message": content.get("evalue") or "",
-                        "stack": content.get("traceback") or [],
-                    }
+                    error = error_from(content)
                 elif ctype == "status" and content.get("execution_state") == "idle":
                     break
         except Exception as e:
