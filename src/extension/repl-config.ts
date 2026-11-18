@@ -42,11 +42,10 @@ export interface ReplConfig {
 	drop: string[];
 	/**
 	 * Where a cell's COMPLETE stdout+stderr is written: `<captureDir>/<session stem>/cell-<n>.txt`.
-	 * ON by default. The tee is the contract, not an option: a view that withheld text can be paged
-	 * instead of re-run, and the copy never leaves the box, so the exposure is nil.
-	 * `""` is the operator's explicit opt-out and is honoured loudly -- the marker then says the copy is
-	 * missing, and `repl status` prints the reason. It is no longer the DEFAULT because a capability that
-	 * has to be discovered reads exactly like a tee that works.
+	 * **NOT optional** (autumn, 2026-11-18): the tee is the contract, so there is no value that turns it
+	 * off -- a directory is a directory, and an empty string is refused like any other junk rather than
+	 * obeyed as a switch. The point of removing the switch is that a mode with no copy behind it cannot
+	 * be described honestly in the tool description, and a contract with an off position is two contracts.
 	 * The tier is tmpfs here (RAM), which is why `cellMaxMb` bounds one cell and why retention of the
 	 * directory as a whole is panlib's (hotCapMb/archiveCapMb, read from this same file): two janitors for
 	 * one tier is how a capture ends up evicted by the wrong one.
@@ -100,8 +99,13 @@ export function parseReplConfig(raw: unknown, warn: (message: string) => void = 
 		} else warn(`[pi-repl] config drop must be a list of tool names, got ${typeof record.drop}; ignoring`);
 	}
 	if (record.captureDir !== undefined) {
-		if (typeof record.captureDir === "string") next.captureDir = expandHome(record.captureDir);
-		else warn(`[pi-repl] config captureDir must be a path or "", got ${typeof record.captureDir}; ignoring`);
+		// "" is junk here, not an off switch: the tee is not optional, so an empty value is refused with
+		// the default kept -- the same treatment a number or a list would get, and said out loud.
+		if (typeof record.captureDir === "string") {
+			const dir = expandHome(record.captureDir);
+			if (dir) next.captureDir = dir;
+			else warn(`[pi-repl] config captureDir is empty, and the tee is not optional; keeping ${DEFAULT_REPL_CONFIG.captureDir}`);
+		} else warn(`[pi-repl] config captureDir must be a path, got ${typeof record.captureDir}; ignoring`);
 	}
 	if (record.cellMaxMb !== undefined) {
 		const n = Number(record.cellMaxMb);

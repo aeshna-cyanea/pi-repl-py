@@ -1145,14 +1145,16 @@ describe("pi-repl.json config", () => {
 		expect(warns.length).toBe(2);
 	});
 
-	test("the tee is ON by default, and only an explicit empty string turns it off", () => {
-		// The default is the CONTRACT (autumn, 2026-11-17): a capability that has to be discovered reads
-		// exactly like a tee that works. "" survives as the operator's opt-out, so it must be reachable on
-		// purpose and must not be what an absent key means -- those are the two ways this test can fail.
+	test("the tee is not optional: a real path by default, and an empty one refused, not obeyed", () => {
+		// autumn removed the opt-out on 2026-11-18 ("lets remove the opt out ofc"), because a contract with
+		// an off position is two contracts and only one of them can be described honestly. So "" is junk
+		// here, treated exactly like a number or a list would be: warned about, default kept.
 		const cfg = parseReplConfig({}, () => {});
 		expect(cfg.captureDir).toBe("/tmp/pan-out");
 		expect(DEFAULT_REPL_CONFIG.captureDir).toBe("/tmp/pan-out");
-		expect(parseReplConfig({ captureDir: "" }, () => {}).captureDir).toBe("");
+		const warns: string[] = [];
+		expect(parseReplConfig({ captureDir: "" }, (m) => warns.push(m)).captureDir).toBe("/tmp/pan-out");
+		expect(warns.join(" ")).toContain("the tee is not optional");
 	});
 });
 
@@ -1302,22 +1304,24 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 });
 
 describe("the execute tool description states the output contract", () => {
-	test("with no tee it says truncated and names the char bound, because nothing is left to read", () => {
-		const d = executeToolDescription();
-		expect(d).toContain(`truncated to ${DEFAULT_MAX_OUTPUT_CHARS} chars`);
-		expect(d).not.toContain("cell-<n>.txt");
-	});
-
-	test("with a tee it says bounded, names the line bound, and says where the whole cell lives", () => {
+	test("one mode, one sentence: bounded, never truncated, because there is always a copy", () => {
+		// The "truncated to N chars" branch described a state that no longer exists (the opt-out is gone),
+		// and it promised the withheld text was gone -- a machine-generated promise nothing can keep now.
 		const d = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, viewChars: 24000 });
 		expect(d).toContain("bounded to 120 lines");
 		expect(d).toContain("/tmp/pan-out/<session>/cell-<n>.txt");
-		expect(d).not.toContain("truncated to");
+		expect(d).not.toContain("truncated");
 	});
 
-	test("both modes open with the same namespace sentence: that part is not a tee detail", () => {
+	test("the marker is named as the instrument for the exception, not just a filename", () => {
+		// A cut copy and a refused write both surface in that cell's own marker; the sentence owes both
+		// halves, or the contract it states is only about the happy path.
+		const d = executeToolDescription({ dir: "/tmp/pan-out", viewLines: 120, viewChars: 24000 });
+		expect(d).toContain("the marker names that file — or says the copy was cut or never written");
+	});
+
+	test("the namespace sentence is not a tee detail, so it opens the description in every case", () => {
 		const head = "in one cell stay available to every later cell.";
-		expect(executeToolDescription()).toContain(head);
 		expect(executeToolDescription({ dir: "/x", viewLines: 1, viewChars: 24000 })).toContain(head);
 	});
 
@@ -2449,15 +2453,17 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 		expect(unbooted).toContain("has not confirmed it");
 	});
 
-	test("status names the disagreement between the config and the bridge, in both directions", () => {
-		// the failure mode I set myself up to hit tonight: a knob in pi-repl.json that the bridge never got
+	test("status names a bridge that declined, and says which directory was asked for", () => {
+		// the failure mode I set myself up to hit once: a knob in pi-repl.json that the bridge never got.
+		// The "config asks for none" half of this test is GONE with the opt-out (2026-11-18): there is no
+		// longer a state where the config is silent and the bridge was given a directory anyway.
 		const refused = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, boot: { on: false, reason: "PAN_SESSION_STEM is unset" } } }));
 		expect(refused).toContain("cell stream tee: OFF");
 		expect(refused).toContain("PAN_SESSION_STEM is unset");
 		expect(refused).toContain("pi-repl.json asks for /tmp/pan-out");
-		const unasked = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/elsewhere" } } }));
-		expect(unasked).toContain("cell stream tee: ON");
-		expect(unasked).toContain("set outside pi-repl.json");
+		const on = formatStatus(facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/tmp/pan-out" } } }));
+		expect(on).toContain("cell stream tee: ON");
+		expect(on).toContain("under /tmp/pan-out");
 	});
 
 	test("status says when a capture is filed under the DECLARED stem, not a session's", () => {

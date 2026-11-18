@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_OUTPUT_CHARS, VIEW_CHARS_ENV, VIEW_LINES_ENV } from "../engine/index.js";
+import { VIEW_CHARS_ENV, VIEW_LINES_ENV } from "../engine/index.js";
 
 /** Which output contract this session is in: bounded with a pointer, or truncated with nothing left. */
 export interface TeeFacts {
@@ -13,18 +13,24 @@ export interface TeeFacts {
 }
 
 /**
-	The tool description. It changes with the tee because the honest sentence about bounded output is
-	different in each mode: with a complete copy, output is BOUNDED and the marker names where the whole
-	thing lives; without one, output is TRUNCATED and the withheld text is gone. The config is what the
-	operator asked for, not what the bridge confirmed -- `repl status` reports that disagreement, and a
-	cell whose copy the bridge refused says so in its own marker.
+	The tool description, and it states ONE contract because there is one mode.
+
+	**The tee is not optional** (autumn, 2026-11-18: *"lets remove the opt out ofc. we arent really
+	designing this for anyone else atm"*), so the second branch is gone rather than merely defaulted
+	away: `if (!tee)` used to say *"Output is truncated to N chars with an explicit marker"*, which
+	promised that the withheld text was gone. That stopped being true when the tee became the default,
+	and keeping the sentence would have been a machine-generated promise nothing can keep.
+
+	The marker is the instrument, not decoration: it names the copy for a cell whose output was cut, and
+	it says so in that cell's own result when the copy itself was cut by the byte bound or never written.
+	So the sentence below owes the reader both halves -- the bound, and where the exception surfaces.
+	What the config can still disagree with is the bridge, and `repl status` is what reports that.
 */
-export function executeToolDescription(tee?: TeeFacts): string {
+export function executeToolDescription(tee: TeeFacts): string {
 	const head =
 		"Execute Python in a Jupyter notebook. Your workspace is one persistent live session: every " +
 		"cell runs in the same namespace, so variables, functions, classes, imports, and data defined " +
 		"in one cell stay available to every later cell.";
-	if (!tee) return `${head} Output is truncated to ${DEFAULT_MAX_OUTPUT_CHARS} chars with an explicit marker`;
 	// Zero bytes when the two halves agree, one clause when they do not: a split bound is legal (an operator may
 	// want a tighter transcript than the helpers' default) and silent is the one shape it must never take.
 	const notes: string[] = [];
@@ -33,7 +39,7 @@ export function executeToolDescription(tee?: TeeFacts): string {
 	if (tee.kernelChars !== undefined && tee.kernelChars !== tee.viewChars)
 		notes.push(`the harness trims at ${tee.viewChars} chars while the kernel's own view verbs default to ${tee.kernelChars}: the agent environment set ${VIEW_CHARS_ENV} and pi-repl.json set viewChars`);
 	const split = notes.length ? `; NOTE the two halves disagree — ${notes.join("; and ")}; a Pi restart makes them agree` : "";
-	return `${head} Output is bounded to ${tee.viewLines} lines and ${tee.viewChars} chars; the complete stream of every cell is kept at ${tee.dir}/<session>/cell-<n>.txt, and the marker names that file${split}`;
+	return `${head} Output is bounded to ${tee.viewLines} lines and ${tee.viewChars} chars; the complete stream of every cell is kept at ${tee.dir}/<session>/cell-<n>.txt, and the marker names that file — or says the copy was cut or never written${split}`;
 }
 export const executePromptSnippet = "Execute Python in a Jupyter notebook (read, write, run, search, and more)";
 

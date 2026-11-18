@@ -223,11 +223,11 @@ export default function (pi: ExtensionAPI) {
 				// pan/logs/keep/<stem>/ and this conversation's state dir are visibly one session.
 				env: {
 					...(sessionFile ? { PAN_SESSION_STEM: conversationName(sessionFile) } : {}),
-					// the capture knobs, from pi-repl.json. captureDir now DEFAULTS to a real path, so
-					// absence here means the operator wrote "" on purpose -- and it still travels as
-					// absence rather than as an empty string, because a half-set knob reads exactly like
-					// a tee that works. The bridge reports which of the two it got (capture_boot_state).
-					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
+					// the capture knobs, from pi-repl.json. captureDir travels UNCONDITIONALLY now: the tee
+					// is not optional (2026-11-18), so there is no "absence means off" state left to
+					// preserve -- and no path by which process.env could hand the bridge a directory the
+					// config never asked for.
+					PI_REPL_CAPTURE_DIR: config.captureDir,
 					[VIEW_LINES_ENV]: String(config.viewLines),
 					[VIEW_CHARS_ENV]: String(config.viewChars),
 					PI_REPL_CAPTURE_MAX_BYTES: String(config.cellMaxMb * 1024 * 1024),
@@ -393,11 +393,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
 		name: "execute",
 		label: "execute",
-		description: executeToolDescription(
-				config.captureDir
-					? { dir: config.captureDir, viewLines: viewReading.lines, kernelLines: viewReading.kernelLines, viewChars: charsReading.chars, kernelChars: charsReading.kernelChars }
-					: undefined,
-			),
+		description: executeToolDescription({
+				dir: config.captureDir,
+				viewLines: viewReading.lines,
+				kernelLines: viewReading.kernelLines,
+				viewChars: charsReading.chars,
+				kernelChars: charsReading.kernelChars,
+			}),
 		promptSnippet: executePromptSnippet,
 		promptGuidelines: buildPromptGuidelines(),
 		parameters: executeSchema,

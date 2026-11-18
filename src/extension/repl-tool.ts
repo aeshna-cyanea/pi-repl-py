@@ -180,7 +180,9 @@ export function formatStatus(f: StatusFacts): string {
 	// The tee gets its own line because it decides whether a bounded view has a complete copy behind it,
 	// and the two sources (config, bridge) are allowed to disagree: report both, never merge them.
 	const c = f.capture;
-	const ask = c.configuredDir === "" ? "pi-repl.json sets no captureDir" : `pi-repl.json asks for ${c.configuredDir}`;
+	// One form, because there is one state: captureDir is not optional, so the "config asks for none" case
+	// went with the opt-out (2026-11-18). What can still differ is config vs bridge, and that is reported.
+	const ask = `pi-repl.json asks for ${c.configuredDir}`;
 	if (!c.boot) {
 		lines.push(`  cell stream tee: ${ask}; view bound ${c.viewLines} line(s) and ${c.viewChars} chars; no kernel booted yet, so the bridge has not confirmed it`);
 	} else if (c.boot.on) {
@@ -195,7 +197,6 @@ export function formatStatus(f: StatusFacts): string {
 			lines.push(
 				`    note: no session file, so this run's captures are filed under ${c.boot.stem}, which declares itself unnamed (the pin tier still refuses: PAN_SESSION_STEM is unset)`,
 			);
-		if (c.configuredDir === "") lines.push("    note: the config asks for none, so PI_REPL_CAPTURE_DIR was set outside pi-repl.json");
 	} else {
 		lines.push(`  cell stream tee: OFF — ${c.boot.reason ?? "the bridge declined"} (${ask})`);
 	}
