@@ -223,8 +223,10 @@ export default function (pi: ExtensionAPI) {
 				// pan/logs/keep/<stem>/ and this conversation's state dir are visibly one session.
 				env: {
 					...(sessionFile ? { PAN_SESSION_STEM: conversationName(sessionFile) } : {}),
-					// the capture knobs, from pi-repl.json: an empty captureDir stays ABSENT, because a
-					// half-set knob reads exactly like a tee that works
+					// the capture knobs, from pi-repl.json. captureDir now DEFAULTS to a real path, so
+					// absence here means the operator wrote "" on purpose -- and it still travels as
+					// absence rather than as an empty string, because a half-set knob reads exactly like
+					// a tee that works. The bridge reports which of the two it got (capture_boot_state).
 					...(config.captureDir ? { PI_REPL_CAPTURE_DIR: config.captureDir } : {}),
 					[VIEW_LINES_ENV]: String(config.viewLines),
 					[VIEW_CHARS_ENV]: String(config.viewChars),

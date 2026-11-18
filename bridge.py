@@ -53,14 +53,21 @@ READY_TIMEOUT_MS = 30_000
 
 # --- the cell stream tee: where the COMPLETE stdout+stderr of a cell goes, before any cap. -----------
 # PI_REPL_CAPTURE_DIR unset = the tee is off: the engine keeps its old channel cap and says the copy is
-# missing. A config choice rather than a default, because writing every cell's output is a decision about
-# this box's disk, not universal behaviour.
+# missing. The host now DEFAULTS it on (repl-config.ts), so absence here means the operator asked for no
+# copy -- and this file still reports the absence, because a bad default must not become a silent one.
 CAPTURE_ENV = "PI_REPL_CAPTURE_DIR"
 CAPTURE_MAX_ENV = "PI_REPL_CAPTURE_MAX_BYTES"
 CAPTURE_MAX_DEFAULT = 32 * 1024 * 1024
 # The session a capture belongs to is TOLD, never guessed: the host passes PAN_SESSION_STEM at spawn
 # (index.ts create()), and a capture filed under a guessed session is a pointer that can lie.
 STEM_ENV = "PAN_SESSION_STEM"
+# When the host has no session file to name -- an ephemeral run, a bare kernel, a test -- the capture is
+# still written, under a stem that DECLARES itself unnamed. Naming it unnamed is not the guess this file
+# refuses: that guess was a *specific* session derived from mtimes, which filed a stranger's cell stream
+# under a real conversation on 2026-10-13. Kept HERE and not in the environment, because PAN_SESSION_STEM
+# is also the pin tier's key (panlib's `session_stem()`): a placeholder there would make `start_pinning()`
+# file captures into a directory named after a session that never existed.
+NO_SESSION_STEM = "--no-session--"
 # Gate refusals arrive from a `pre_run_cell` hook, so the cell never ran: every frame in the stack belongs to
 # my machinery, and the gate has already printed the reason WITH the cell line in it. Publishing that stack
 # costs real context for no information -- measured 2026-11-17, 1,490 of a 2,365-char refusal (63%), pointing
@@ -87,18 +94,30 @@ def error_from(content):
     }
 
 
+def capture_stem():
+    """`(stem, source)` for the tee: "session" when the host named one, "declared" when it could not.
+
+    ONE resolver for the boot report and the write path. Two of them would let `repl status` announce a
+    stem that no cell ever lands under, which is the failure this whole report exists to prevent.
+    """
+    told = os.environ.get(STEM_ENV)
+    return (told, "session") if told else (NO_SESSION_STEM, "declared")
+
+
 def capture_boot_state():
     """What the tee will actually do, said once at boot where the bridge is reported.
 
     The reason this is reported and not merely read: a knob that silently never writes is a knob that is
     off, and a component that is off without saying so reads exactly like a component that is working.
+    `stem_source` rides along for the same reason -- a capture under the declared placeholder is a real
+    capture, and it should not take reading the directory name to learn that no session owned it.
     """
     root = os.environ.get(CAPTURE_ENV)
     if not root:
         return {"on": False, "reason": "%s is unset: cell streams are capped, not copied" % CAPTURE_ENV}
-    if not os.environ.get(STEM_ENV):
-        return {"on": False, "reason": "%s is unset: the bridge will not guess which session owns a capture" % STEM_ENV}
-    return {"on": True, "dir": root, "max_bytes": int(os.environ.get(CAPTURE_MAX_ENV) or CAPTURE_MAX_DEFAULT)}
+    stem, source = capture_stem()
+    return {"on": True, "dir": root, "stem": stem, "stem_source": source,
+            "max_bytes": int(os.environ.get(CAPTURE_MAX_ENV) or CAPTURE_MAX_DEFAULT)}
 
 
 def tee_add(cap, name, text, max_bytes):
@@ -619,10 +638,8 @@ class Bridge:
         root = os.environ.get(CAPTURE_ENV)
         if not root:
             return None
-        stem = os.environ.get(STEM_ENV)
-        if not stem:
-            # told, never guessed: a capture filed under a guessed session is a pointer that can lie
-            return {"reason": "%s is unset, so there is no session to file this capture in" % STEM_ENV}
+        # told, never guessed -- and when nobody could tell, the stem SAYS so (see NO_SESSION_STEM)
+        stem, _ = capture_stem()
         if not isinstance(n, int):
             return {"reason": "no execute_input for this cell: nothing to name the capture by"}
         parts, stats = [], {}

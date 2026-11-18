@@ -184,9 +184,17 @@ export function formatStatus(f: StatusFacts): string {
 	if (!c.boot) {
 		lines.push(`  cell stream tee: ${ask}; view bound ${c.viewLines} line(s) and ${c.viewChars} chars; no kernel booted yet, so the bridge has not confirmed it`);
 	} else if (c.boot.on) {
+		// The stem is reported, not assumed: `declared` means there is no session file, and the bridge is
+		// filing under a placeholder that names itself unnamed. Saying so here is what keeps "captured"
+		// from reading as "captured into the conversation I am in".
+		const where = c.boot.stem ? `<${c.boot.stem}>/cell-<n>.txt` : "<stem>/cell-<n>.txt";
 		lines.push(
-			`  cell stream tee: ON — <stem>/cell-<n>.txt under ${c.boot.dir}; view bound ${c.viewLines} line(s) and ${c.viewChars} chars; one cell capped at ${c.boot.max_bytes ?? "?"} B`,
+			`  cell stream tee: ON — ${where} under ${c.boot.dir}; view bound ${c.viewLines} line(s) and ${c.viewChars} chars; one cell capped at ${c.boot.max_bytes ?? "?"} B`,
 		);
+		if (c.boot.stem_source === "declared")
+			lines.push(
+				`    note: no session file, so this run's captures are filed under ${c.boot.stem}, which declares itself unnamed (the pin tier still refuses: PAN_SESSION_STEM is unset)`,
+			);
 		if (c.configuredDir === "") lines.push("    note: the config asks for none, so PI_REPL_CAPTURE_DIR was set outside pi-repl.json");
 	} else {
 		lines.push(`  cell stream tee: OFF — ${c.boot.reason ?? "the bridge declined"} (${ask})`);

@@ -42,9 +42,14 @@ export interface ReplConfig {
 	drop: string[];
 	/**
 	 * Where a cell's COMPLETE stdout+stderr is written: `<captureDir>/<session stem>/cell-<n>.txt`.
-	 * Empty (the default) means the tee is off: the engine caps output and says there is no copy. It is
-	 * opt-in because writing every cell's stream is a decision about this box's disk -- on bagheera the
-	 * hot tier is tmpfs, i.e. RAM, and a retention policy already lives next to it in panlib.
+	 * ON by default. The tee is the contract, not an option: a view that withheld text can be paged
+	 * instead of re-run, and the copy never leaves the box, so the exposure is nil.
+	 * `""` is the operator's explicit opt-out and is honoured loudly -- the marker then says the copy is
+	 * missing, and `repl status` prints the reason. It is no longer the DEFAULT because a capability that
+	 * has to be discovered reads exactly like a tee that works.
+	 * The tier is tmpfs here (RAM), which is why `cellMaxMb` bounds one cell and why retention of the
+	 * directory as a whole is panlib's (hotCapMb/archiveCapMb, read from this same file): two janitors for
+	 * one tier is how a capture ends up evicted by the wrong one.
 	 */
 	captureDir: string;
 	/**
@@ -69,7 +74,7 @@ export interface ReplConfig {
 export const DEFAULT_REPL_CONFIG: ReplConfig = {
 	defaultOn: false,
 	drop: [],
-	captureDir: "",
+	captureDir: "/tmp/pan-out",
 	viewLines: 120,
 	viewChars: 24000,
 	cellMaxMb: 32,

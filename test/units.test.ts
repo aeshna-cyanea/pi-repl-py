@@ -1139,15 +1139,20 @@ describe("pi-repl.json config", () => {
 		expect(cfg.captureDir).toBe("/tmp/pan-out");
 		expect(cfg.viewLines).toBe(60);
 		const bad = parseReplConfig({ captureDir: 7, viewLines: "many" }, (m) => warns.push(m));
-		expect(bad.captureDir).toBe("");
+		// junk is IGNORED, so the default survives -- and the default is now a real path, not ""
+		expect(bad.captureDir).toBe("/tmp/pan-out");
 		expect(bad.viewLines).toBe(120);
 		expect(warns.length).toBe(2);
 	});
 
-	test("an unset captureDir means the tee is off, which is the default", () => {
+	test("the tee is ON by default, and only an explicit empty string turns it off", () => {
+		// The default is the CONTRACT (autumn, 2026-11-17): a capability that has to be discovered reads
+		// exactly like a tee that works. "" survives as the operator's opt-out, so it must be reachable on
+		// purpose and must not be what an absent key means -- those are the two ways this test can fail.
 		const cfg = parseReplConfig({}, () => {});
-		expect(cfg.captureDir).toBe("");
-		expect(DEFAULT_REPL_CONFIG.captureDir).toBe("");
+		expect(cfg.captureDir).toBe("/tmp/pan-out");
+		expect(DEFAULT_REPL_CONFIG.captureDir).toBe("/tmp/pan-out");
+		expect(parseReplConfig({ captureDir: "" }, () => {}).captureDir).toBe("");
 	});
 });
 
@@ -1255,15 +1260,16 @@ describe("repl tool surface: prune Pi's built-ins, never another extension's too
 describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 	test("a box with no config file gets the defaults", () => {
 		// Whole-object pins on purpose: a new config field has to earn its default here, in the open.
-		// captureDir "" means the tee is off; viewLines 120 is the measured view budget.
+		// captureDir defaults to the real tier: the tee is on unless an operator says otherwise;
+		// viewLines 120 is the measured view budget.
 		const missing = mkdtempSync(join(tmpdir(), "pi-repl-nocfg-"));
-		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
+		expect(loadReplConfig(missing)).toEqual({ defaultOn: false, drop: [], captureDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
 	});
 
 	test("defaultOn and the drop list are read", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-repl-cfg-"));
 		writeFileSync(join(dir, "pi-repl.json"), JSON.stringify({ defaultOn: true, drop: ["sessions", "remote"] }));
-		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
+		expect(loadReplConfig(dir)).toEqual({ defaultOn: true, drop: ["sessions", "remote"], captureDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
 	});
 
 	test("a config file that exists but cannot be parsed is loud, and defaults apply", () => {
@@ -1277,7 +1283,7 @@ describe("pi-repl.json: start repl engaged, and drop tools on purpose", () => {
 
 	test("junk entries are ignored with a count, never silently", () => {
 		const warns: string[] = [];
-		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
+		expect(parseReplConfig({ drop: ["sessions", 5, "", "remote"] }, (m) => warns.push(m))).toEqual({ defaultOn: false, drop: ["sessions", "remote"], captureDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, cellMaxMb: 32 });
 		expect(warns.join(" ")).toContain("ignored 2");
 		const warns2: string[] = [];
 		expect(parseReplConfig({ defaultOn: "yes", drop: "sessions" }, (m) => warns2.push(m))).toEqual(DEFAULT_REPL_CONFIG);
@@ -2452,6 +2458,23 @@ describe("the repl tool: what the three verbs mean, and what they refuse", () =>
 		const unasked = formatStatus(facts({ capture: { configuredDir: "", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/elsewhere" } } }));
 		expect(unasked).toContain("cell stream tee: ON");
 		expect(unasked).toContain("set outside pi-repl.json");
+	});
+
+	test("status says when a capture is filed under the DECLARED stem, not a session's", () => {
+		// A capture with no session is still a capture, and the one thing it must not do is read as though
+		// it belonged to the conversation I am in. The bridge declares the placeholder; status repeats it.
+		const declared = formatStatus(
+			facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/tmp/pan-out", stem: "--no-session--", stem_source: "declared" } } }),
+		);
+		expect(declared).toContain("<--no-session-->/cell-<n>.txt");
+		expect(declared).toContain("declares itself unnamed");
+		expect(declared).toContain("the pin tier still refuses");
+		// and a told stem is named without the warning
+		const told = formatStatus(
+			facts({ capture: { configuredDir: "/tmp/pan-out", viewLines: 120, viewChars: 24000, boot: { on: true, dir: "/tmp/pan-out", stem: "2026-01-01T00-00-00-000Z_abc", stem_source: "session" } } }),
+		);
+		expect(told).toContain("<2026-01-01T00-00-00-000Z_abc>/cell-<n>.txt");
+		expect(told).not.toContain("declares itself unnamed");
 	});
 
 	test("restart always flushes first; only fresh skips the revive", () => {

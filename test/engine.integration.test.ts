@@ -61,6 +61,28 @@ function withBootIsolation(opts: Record<string, unknown>): Record<string, unknow
 	return { ...opts, env: { ...given, PI_REPL_BOOTSTRAP: "" } };
 }
 
+/**
+ * Capture/view isolation, the same reasoning a third time: a Pi host exports the capture directory, the
+ * session stem and both view bounds into the kernel, and a kernel is where these tests are often RUN from
+ * (`bun test` in a cell). The spawn env is `{...process.env, ...opts.env}`, so a child kernel inherits all
+ * four and tees when the test assumed no tee -- measured 2026-11-18: five green tests went red that way,
+ * and the capture each one wrote named the RUNNING session's stem and cell numbers rather than a temp dir.
+ * An empty string is the documented off switch for every one of them (a falsy capture dir is "no tee";
+ * junk bounds like "" are ignored by resolveViewLines/resolveViewChars, not obeyed as 0). Tests that mean
+ * to exercise the tee or a bound pass it themselves and are left alone.
+ */
+/**
+ * The suite's own ENVIRONMENT is part of its fixture, and it is dropped once, here.
+ *
+ * `bun test` is often run from a cell -- as a child of a kernel that carries the whole capture and view
+ * configuration -- and the HOST reads `PAN_VIEW_LINES`/`PAN_VIEW_CHARS` from its own `process.env` as the
+ * agent-env layer (`resolveViewLines(perCall, process.env, options.env)`), which OUTRANKS what a test hands
+ * the kernel. So scrubbing the child's env is not enough: measured 2026-11-18, two tee tests saw a 122-line
+ * body where they expected 22 (120 inherited + 2). Deleting the prefixes here means every test starts from
+ * the defaults; a test that wants a knob passes it in `opts.env`, and still does.
+ */
+for (const k of Object.keys(process.env)) if (k.startsWith("PI_REPL_") || k.startsWith("PAN_")) delete process.env[k];
+
 function engine(opts: Record<string, unknown>) {
 	const m = new EngineManager(withBootIsolation(withHelperIsolation(opts)) as never);
 	engines.push(m);

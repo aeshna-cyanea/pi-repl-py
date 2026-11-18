@@ -71,6 +71,10 @@ export interface CaptureBootState {
 	dir?: string;
 	max_bytes?: number;
 	reason?: string;
+	/** The directory a capture lands under. Absent on an older bridge, which is why `repl status` has a fallback. */
+	stem?: string;
+	/** "session" when the host named one at spawn, "declared" when the bridge is filing under its placeholder. */
+	stem_source?: "session" | "declared";
 }
 
 export interface CellResult {
